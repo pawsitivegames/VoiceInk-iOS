@@ -12,6 +12,7 @@ import SwiftData
 struct VoiceInk_iosApp: App {
     @State private var hasCompletedOnboarding = UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
     @StateObject private var recordingManager = RecordingManager()
+    @Environment(\.scenePhase) private var scenePhase
     
     init() {
         // Clear any stale recording state on app launch
@@ -41,6 +42,9 @@ struct VoiceInk_iosApp: App {
                     .onOpenURL { url in
                         handleURL(url)
                     }
+                    .onChange(of: scenePhase) { oldPhase, newPhase in
+                        handleScenePhaseChange(from: oldPhase, to: newPhase)
+                    }
             } else {
                 OnboardingView(isOnboardingComplete: $hasCompletedOnboarding)
                     .onOpenURL { url in
@@ -49,6 +53,21 @@ struct VoiceInk_iosApp: App {
             }
         }
         .modelContainer(sharedModelContainer)
+    }
+    
+    private func handleScenePhaseChange(from oldPhase: ScenePhase, to newPhase: ScenePhase) {
+        // When app becomes active, check for stop recording flag
+        if newPhase == .active && oldPhase != .active {
+            print("📱 App became active, checking for stop recording flag")
+            let coordinator = AppGroupCoordinator.shared
+            if coordinator.checkAndConsumeStopRecordingFlag() {
+                print("🛑 Stop recording flag found, stopping recording")
+                if recordingManager.isRecording {
+                    // We need modelContext, so post a notification
+                    NotificationCenter.default.post(name: .stopRecordingFromKeyboard, object: nil)
+                }
+            }
+        }
     }
     
     private func handleURL(_ url: URL) {

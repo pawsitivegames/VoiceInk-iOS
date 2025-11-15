@@ -41,8 +41,48 @@ struct WhisperModel: Identifiable, Codable {
         description: "Multilingual model with good balance of speed and accuracy"
     )
     
+    // Core ML encoder model for base model (optional optimization)
+    static let baseCoreMLEncoder = WhisperModel(
+        name: "base-coreml-encoder",
+        displayName: "Core ML Encoder (Base Model)",
+        downloadURL: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-encoder.mlmodelc.zip",
+        filename: "ggml-base-encoder.mlmodelc",
+        size: "~50 MB",
+        description: "Core ML encoder optimization for faster transcription on Apple devices"
+    )
+    
     // Future models can be added here
     static let availableModels = [baseModel]
+    
+    // Core ML encoders for available models
+    static let availableCoreMLEncoders = [baseCoreMLEncoder]
+    
+    /// Get the Core ML encoder model for a given base model
+    static func coreMLEncoder(for baseModel: WhisperModel) -> WhisperModel? {
+        switch baseModel.name {
+        case "base":
+            return baseCoreMLEncoder
+        default:
+            return nil
+        }
+    }
+    
+    /// Get the expected Core ML encoder filename for a base model
+    var coreMLEncoderFilename: String {
+        // Convert "ggml-base.bin" to "ggml-base-encoder.mlmodelc"
+        let baseName = filename.replacingOccurrences(of: ".bin", with: "")
+        return "\(baseName)-encoder.mlmodelc"
+    }
+    
+    /// Get the Core ML encoder file URL
+    var coreMLEncoderURL: URL {
+        LocalModelManager.modelsDirectory.appendingPathComponent(coreMLEncoderFilename)
+    }
+    
+    /// Check if Core ML encoder is downloaded
+    var isCoreMLEncoderDownloaded: Bool {
+        FileManager.default.fileExists(atPath: coreMLEncoderURL.path)
+    }
 }
 
 @MainActor
@@ -221,6 +261,77 @@ class LocalModelManager: ObservableObject {
         WhisperModel.availableModels.first { $0.isDownloaded }
     }
     
+    /// Check if Core ML encoder is available for a model
+    func hasCoreMLEncoder(for baseModel: WhisperModel) -> Bool {
+        return baseModel.isCoreMLEncoderDownloaded
+    }
+    
+    /// Get instructions for manually downloading Core ML encoder
+    func getCoreMLEncoderInstructions(for baseModel: WhisperModel) -> String {
+        guard let coreMLModel = WhisperModel.coreMLEncoder(for: baseModel) else {
+            return "Core ML encoder not available for this model"
+        }
+        
+        return """
+        To download the Core ML encoder for better performance:
+        
+        1. Download from: \(coreMLModel.downloadURL)
+        2. Extract the zip file
+        3. Place the '\(coreMLModel.filename)' directory in:
+           \(Self.modelsDirectory.path)
+        
+        The encoder will be automatically detected and used by Whisper.
+        """
+    }
+    
+    /// Download Core ML encoder for a base model
+    /// Note: This requires zip extraction which isn't built into iOS.
+    /// For now, this provides instructions for manual download.
+    func downloadCoreMLEncoder(for baseModel: WhisperModel) async throws {
+        guard let coreMLModel = WhisperModel.coreMLEncoder(for: baseModel) else {
+            throw ModelDownloadError.invalidURL
+        }
+        
+        // Check if base model is downloaded first
+        guard baseModel.isDownloaded else {
+            throw ModelDownloadError.downloadFailed
+        }
+        
+        // Check if already downloaded
+        guard !baseModel.isCoreMLEncoderDownloaded else {
+            print("LocalModelManager: Core ML encoder for \(baseModel.name) is already downloaded")
+            return
+        }
+        
+        guard !isDownloading[coreMLModel.id, default: false] else {
+            print("LocalModelManager: Core ML encoder for \(baseModel.name) is already being downloaded")
+            return
+        }
+        
+        // For .mlmodelc files, we need to download as a zip and extract
+        // The Hugging Face URL provides a zip file
+        guard let url = URL(string: coreMLModel.downloadURL) else {
+            throw ModelDownloadError.invalidURL
+        }
+        
+        print("LocalModelManager: Starting download of Core ML encoder for \(baseModel.name)")
+        
+        isDownloading[coreMLModel.id] = true
+        downloadProgress[coreMLModel.id] = 0.0
+        downloadError = nil
+        
+        // Note: iOS doesn't have built-in zip extraction capabilities.
+        // To add automatic download, you would need to:
+        // 1. Add a Swift package like ZipFoundation (https://github.com/weichsel/ZIPFoundation)
+        // 2. Or use a server-side service to extract and serve the .mlmodelc directory
+        
+        // For now, provide clear instructions for manual download
+        isDownloading[coreMLModel.id] = false
+        let instructions = getCoreMLEncoderInstructions(for: baseModel)
+        downloadError = instructions
+        throw ModelDownloadError.downloadFailed
+    }
+    
     /// Get disk usage information for models
     func getModelsDiskUsage() -> (totalSize: Int64, modelCount: Int) {
         let modelsDir = Self.modelsDirectory
@@ -231,7 +342,8 @@ class LocalModelManager: ObservableObject {
             let contents = try FileManager.default.contentsOfDirectory(at: modelsDir, includingPropertiesForKeys: [.fileSizeKey])
             
             for fileURL in contents {
-                if fileURL.pathExtension == "bin" {
+                // Count both .bin models and .mlmodelc encoders
+                if fileURL.pathExtension == "bin" || fileURL.pathExtension == "mlmodelc" {
                     modelCount += 1
                     if let resourceValues = try? fileURL.resourceValues(forKeys: [.fileSizeKey]),
                        let fileSize = resourceValues.fileSize {

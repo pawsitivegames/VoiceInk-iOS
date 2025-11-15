@@ -7,22 +7,33 @@
 
 import UIKit
 import KeyboardKit
+import os
 
 class KeyboardViewController: KeyboardInputViewController {
+    private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "KeyboardExtension")
     
     var recordButton: UIButton!
     private let coordinator = AppGroupCoordinator.shared
     private var recordingStatusTimer: Timer?
+    private var transcriptPollingTimer: Timer?
+    private var transcriptPollingStartTime: Date?
+    private var stopRequestTimestamp: TimeInterval = 0 // Track when stop was requested
+    private let transcriptPollingTimeout: TimeInterval = 60.0 // 60 seconds timeout
+    private var pendingTranscript: String? // Store transcript locally for retry attempts
+    private var transcriptInsertionAttempts: Int = 0 // Track insertion attempts
     
     deinit {
         recordingStatusTimer?.invalidate()
         recordingStatusTimer = nil
+        transcriptPollingTimer?.invalidate()
+        transcriptPollingTimer = nil
     }
     
     override func viewDidLoad() {
         super.viewDidLoad()
         setupKeyboard()
         setupRecordingStatusMonitoring()
+        setupTranscriptNotificationObserver()
     }
     
     private func setupKeyboard() {
@@ -143,6 +154,37 @@ class KeyboardViewController: KeyboardInputViewController {
         } else {
             // no-op
         }
+        
+        // Update button state immediately when keyboard appears
+        // This ensures the button shows the correct state when user switches back
+        updateButtonAppearanceBasedOnState()
+        
+        // Restart monitoring if timer was stopped
+        if recordingStatusTimer == nil {
+            setupRecordingStatusMonitoring()
+        }
+        
+        // Check if there's a pending transcript to insert when keyboard becomes active
+        // This handles the case where transcript was ready but keyboard wasn't active
+        // Try multiple times with increasing delays to catch the keyboard when it's ready
+        if coordinator.isTranscriptReady {
+            logger.info("📝 Keyboard: Found pending transcript when keyboard appeared, will attempt to insert")
+            
+            // Try immediately
+            tryInsertPendingTranscript()
+            
+            // Try multiple times with increasing delays to ensure we catch it when keyboard is fully ready
+            let delays: [TimeInterval] = [0.1, 0.2, 0.3, 0.5, 0.8, 1.0]
+            for delay in delays {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    guard let self = self else { return }
+                    // Only try if transcript is still ready (hasn't been consumed)
+                    if self.coordinator.isTranscriptReady {
+                        self.tryInsertPendingTranscript()
+                    }
+                }
+            }
+        }
     }
 
     override func viewWillLayoutSubviews() {
@@ -176,10 +218,26 @@ class KeyboardViewController: KeyboardInputViewController {
         
         if coordinator.isRecording {
             // Stop recording
+            logger.info("🛑 Keyboard: Stop button pressed, requesting stop recording")
+            
+            // Clear any old/stale transcript before starting new polling
+            // This ensures we don't get a transcript from a previous recording
+            coordinator.clearOldTranscript()
+            
+            // Record when we requested stop (to match with transcript timestamp)
+            stopRequestTimestamp = Date().timeIntervalSince1970
+            
             coordinator.requestStopRecording()
+            logger.info("🛑 Keyboard: Stop request sent, starting transcript polling (timestamp: \(self.stopRequestTimestamp))")
             updateButtonAppearanceBasedOnState()
+            // Start polling for transcript
+            startTranscriptPolling()
         } else {
             // Start recording by opening main app
+            // Clear any old transcript when starting new recording
+            coordinator.clearOldTranscript()
+            // Reset stop request timestamp
+            stopRequestTimestamp = 0
             openMainAppForRecording()
         }
     }
@@ -204,9 +262,9 @@ class KeyboardViewController: KeyboardInputViewController {
             // Method 1: Try extensionContext.open (primary method)
             extensionContext?.open(url) { success in
                 if success {
-                    print("✅ Opened main app via extensionContext")
+                    self.logger.info("✅ Opened main app via extensionContext")
                 } else {
-                    print("❌ extensionContext.open failed, trying alternative methods")
+                    self.logger.warning("❌ extensionContext.open failed, trying alternative methods")
                     DispatchQueue.main.async {
                         self.tryAlternativeURLOpening(url)
                     }
@@ -224,9 +282,9 @@ class KeyboardViewController: KeyboardInputViewController {
             if sharedApp.canOpenURL(url) {
                 sharedApp.open(url, options: [:]) { success in
                     if success {
-                        print("✅ Opened main app via UIApplication.open")
+                        self.logger.info("✅ Opened main app via UIApplication.open")
                     } else {
-                        print("❌ UIApplication.open failed")
+                        self.logger.error("❌ UIApplication.open failed")
                         self.showUserMessage()
                     }
                 }
@@ -249,10 +307,10 @@ class KeyboardViewController: KeyboardInputViewController {
         
         if let responder = responder {
             _ = responder.perform(selector, with: url)
-            print("✅ Attempted to open main app via responder chain")
+            logger.info("✅ Attempted to open main app via responder chain")
             // Don't assume success since we can't get feedback from this method
         } else {
-            print("❌ All URL opening methods failed")
+            logger.error("❌ All URL opening methods failed")
             showUserMessage()
         }
     }
@@ -274,13 +332,296 @@ class KeyboardViewController: KeyboardInputViewController {
     }
     
     private func setupRecordingStatusMonitoring() {
+        // Stop any existing timer
+        recordingStatusTimer?.invalidate()
+        
         // Monitor recording status every 0.5 seconds
+        // Use common run loop modes so timer works even when keyboard is active
         recordingStatusTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.updateButtonAppearanceBasedOnState()
         }
         
+        // Add to common run loop modes to ensure it runs when keyboard is active
+        if let timer = recordingStatusTimer {
+            RunLoop.current.add(timer, forMode: .common)
+        }
+        
         // Initial state update
         updateButtonAppearanceBasedOnState()
+    }
+    
+    private func startTranscriptPolling() {
+        // Stop any existing polling
+        stopTranscriptPolling()
+        
+        // Record start time for timeout
+        transcriptPollingStartTime = Date()
+        
+        logger.info("🔄 Keyboard: Starting transcript polling (stopRequestTimestamp: \(self.stopRequestTimestamp))")
+        
+        // Start with aggressive polling (every 0.1 seconds) to catch transcript as soon as it's ready
+        transcriptPollingTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            self?.checkForTranscript()
+        }
+        
+        // Add to common run loop modes
+        if let timer = transcriptPollingTimer {
+            RunLoop.current.add(timer, forMode: .common)
+        }
+        
+        // Also check immediately
+        checkForTranscript()
+    }
+    
+    private func stopTranscriptPolling() {
+        transcriptPollingTimer?.invalidate()
+        transcriptPollingTimer = nil
+        transcriptPollingStartTime = nil
+    }
+    
+    private func checkForTranscript() {
+        // Check for timeout
+        if let startTime = transcriptPollingStartTime {
+            let elapsed = Date().timeIntervalSince(startTime)
+            if elapsed > transcriptPollingTimeout {
+                logger.warning("⏱️ Keyboard: Transcript polling timed out after \(self.transcriptPollingTimeout) seconds")
+                stopTranscriptPolling()
+                return
+            }
+        }
+        
+        // Check if transcript is ready
+        let isReady = coordinator.isTranscriptReady
+        if !isReady {
+            // Only log every 50th check to avoid spam (every 5 seconds with 0.1s interval)
+            if let startTime = transcriptPollingStartTime {
+                let elapsed = Date().timeIntervalSince(startTime)
+                if Int(elapsed * 10) % 50 == 0 { // Log every 5 seconds
+                    logger.debug("🔄 Keyboard: Polling for transcript... (elapsed: \(Int(elapsed))s)")
+                }
+            }
+            return
+        }
+        
+        logger.info("✅ Keyboard: Transcript is ready, attempting to insert...")
+        
+        // Try to insert the transcript - be more aggressive about it
+        attemptTranscriptInsertion()
+    }
+    
+    private func attemptTranscriptInsertion() {
+        // If we already have a pending transcript, use it (for retries)
+        if let existingTranscript = pendingTranscript {
+            logger.info("🔄 Keyboard: Retrying with existing pending transcript (\(existingTranscript.count) chars)")
+            tryInsertTranscriptWithRetries(existingTranscript)
+            return
+        }
+        
+        // Get the transcript - don't consume it yet, store it locally for retries
+        guard coordinator.isTranscriptReady else {
+            logger.warning("⚠️ Keyboard: Transcript not ready yet")
+            return
+        }
+        
+        // Get transcript without consuming it - we'll consume after successful insertion
+        guard let transcript = coordinator.getTranscriptWithoutConsuming(afterTimestamp: stopRequestTimestamp) else {
+            logger.warning("⚠️ Keyboard: Failed to retrieve transcript, will keep trying...")
+            return
+        }
+        
+        logger.info("✅ Keyboard: Got transcript (\(transcript.count) chars), attempting to insert now")
+        
+        // Store locally for retry attempts
+        pendingTranscript = transcript
+        transcriptInsertionAttempts = 0
+        
+        // Stop polling since we got the transcript
+        stopTranscriptPolling()
+        
+        // Try to insert with retries
+        tryInsertTranscriptWithRetries(transcript)
+    }
+    
+    private func tryInsertTranscriptWithRetries(_ transcript: String) {
+        transcriptInsertionAttempts += 1
+        
+        // Try multiple times with delays to ensure keyboard is ready
+        let delays: [TimeInterval] = [0.0, 0.1, 0.3, 0.5, 1.0, 2.0]
+        
+        guard transcriptInsertionAttempts <= delays.count else {
+            logger.warning("⚠️ Keyboard: Max insertion attempts (\(delays.count)) reached, giving up")
+            // Consume the transcript even if we failed (to prevent it from being stuck)
+            _ = coordinator.getAndConsumeTranscript(afterTimestamp: stopRequestTimestamp)
+            pendingTranscript = nil
+            transcriptInsertionAttempts = 0
+            return
+        }
+        
+        let delay = delays[transcriptInsertionAttempts - 1]
+        logger.info("🔄 Keyboard: Attempt \(transcriptInsertionAttempts)/\(delays.count), delay: \(delay)s")
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self else { return }
+            
+            // textDocumentProxy should always be available in KeyboardInputViewController
+            // But we can check if the view is in a window as a proxy for keyboard readiness
+            guard self.view.window != nil else {
+                if delay < delays.last! {
+                    // Retry if we haven't exhausted all attempts
+                    self.logger.debug("⏳ Keyboard: View not in window yet, will retry")
+                    self.tryInsertTranscriptWithRetries(transcript)
+                } else {
+                    self.logger.warning("❌ Keyboard: View never appeared in window")
+                    // Consume the transcript to prevent it from being stuck
+                    _ = self.coordinator.getAndConsumeTranscript(afterTimestamp: self.stopRequestTimestamp)
+                    self.pendingTranscript = nil
+                }
+                return
+            }
+            
+            // Try to insert
+            self.logger.info("📝 Keyboard: Attempting insertion (attempt \(self.transcriptInsertionAttempts)/\(delays.count))")
+            let success = self.insertTranscript(transcript)
+            
+            if success {
+                // Success! Consume the transcript
+                self.logger.info("✅ Keyboard: Successfully inserted transcript on attempt \(self.transcriptInsertionAttempts)")
+                _ = self.coordinator.getAndConsumeTranscript(afterTimestamp: self.stopRequestTimestamp)
+                self.pendingTranscript = nil
+                self.transcriptInsertionAttempts = 0
+            } else if self.transcriptInsertionAttempts < delays.count {
+                // Failed but have more attempts - retry
+                self.logger.warning("⚠️ Keyboard: Insertion returned false, will retry (attempt \(self.transcriptInsertionAttempts)/\(delays.count))")
+                self.tryInsertTranscriptWithRetries(transcript)
+            } else {
+                // All attempts exhausted
+                self.logger.error("❌ Keyboard: All \(delays.count) insertion attempts failed")
+                // Consume the transcript to prevent it from being stuck
+                _ = self.coordinator.getAndConsumeTranscript(afterTimestamp: self.stopRequestTimestamp)
+                self.pendingTranscript = nil
+                self.transcriptInsertionAttempts = 0
+            }
+        }
+    }
+    
+    private func setupTranscriptNotificationObserver() {
+        // Listen for Darwin notifications about transcript being ready
+        let notificationName = "com.prakashjoshipax.VoiceInk.transcriptReady"
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        
+        CFNotificationCenterAddObserver(
+            center,
+            Unmanaged.passUnretained(self).toOpaque(),
+            { (center, observer, name, object, userInfo) in
+                guard let observer = observer else { return }
+                let keyboardVC = Unmanaged<KeyboardViewController>.fromOpaque(observer).takeUnretainedValue()
+                keyboardVC.handleTranscriptReadyNotification()
+            },
+            notificationName as CFString,
+            nil,
+            .deliverImmediately
+        )
+        
+        logger.info("📡 Keyboard: Set up transcript ready notification observer")
+    }
+    
+    private func handleTranscriptReadyNotification() {
+        logger.info("🔔 Keyboard: Received transcript ready Darwin notification")
+        
+        // Try to insert immediately when we get the notification
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if self.coordinator.isTranscriptReady {
+                self.logger.info("✅ Keyboard: Transcript is ready (from notification), attempting insertion")
+                // Always try immediate insertion when we get the notification
+                // This ensures we catch it as soon as possible
+                self.attemptTranscriptInsertion()
+            } else {
+                self.logger.warning("⚠️ Keyboard: Notification received but transcript not ready yet")
+            }
+        }
+    }
+    
+    private func tryInsertPendingTranscript() {
+        guard coordinator.isTranscriptReady else { return }
+        
+        // Be more aggressive - try to insert even if keyboard doesn't seem fully ready
+        logger.info("🔄 Keyboard: Attempting to insert pending transcript")
+        attemptTranscriptInsertion()
+    }
+    
+    private func insertTranscript(_ text: String) -> Bool {
+        // Insert the text at the current cursor position
+        logger.info("📝 Keyboard: Attempting to insert transcript: \(text.prefix(50))... (length: \(text.count))")
+        
+        // textDocumentProxy is always available in KeyboardInputViewController
+        let proxy = textDocumentProxy
+        logger.debug("📝 Keyboard: textDocumentProxy available, hasText=\(proxy.hasText)")
+        
+        // Use textDocumentProxy.insertText directly - this is the standard iOS keyboard extension API
+        // For reliability, always insert in smaller chunks
+        let words = text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+        
+        guard !words.isEmpty else {
+            logger.warning("⚠️ Keyboard: No words to insert")
+            return false
+        }
+        
+        // If text is short, insert all at once for better performance
+        if text.count < 100 {
+            logger.info("📝 Keyboard: Inserting short text all at once")
+            proxy.insertText(text)
+            logger.info("✅ Keyboard: Text inserted successfully")
+            
+            // Provide haptic feedback
+            let notificationFeedback = UINotificationFeedbackGenerator()
+            notificationFeedback.notificationOccurred(.success)
+            return true
+        }
+        
+        // For longer text, insert word by word
+        var wordIndex = 0
+        
+        func insertNextWord() {
+            guard wordIndex < words.count else {
+                logger.info("✅ Keyboard: Finished inserting all \(words.count) words")
+                
+                // Provide haptic feedback
+                let notificationFeedback = UINotificationFeedbackGenerator()
+                notificationFeedback.notificationOccurred(.success)
+                return
+            }
+            
+            let word = words[wordIndex]
+            // Add space before word (except first word)
+            let prefix = wordIndex > 0 ? " " : ""
+            let textToInsert = prefix + word
+            
+            // Insert the word
+            proxy.insertText(textToInsert)
+            
+            wordIndex += 1
+            
+            // Insert next word after a small delay to ensure reliability
+            if wordIndex < words.count {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
+                    insertNextWord()
+                }
+            } else {
+                logger.info("✅ Keyboard: All text inserted successfully (\(words.count) words)")
+                
+                // Provide haptic feedback
+                let notificationFeedback = UINotificationFeedbackGenerator()
+                notificationFeedback.notificationOccurred(.success)
+            }
+        }
+        
+        // Start inserting
+        insertNextWord()
+        
+        // Return success (note: for async word-by-word insertion, this is optimistic)
+        // The actual success will be determined by whether all words were inserted
+        return true
     }
     
     private func updateButtonAppearanceBasedOnState() {
@@ -291,10 +632,14 @@ class KeyboardViewController: KeyboardInputViewController {
             
             if isRecording {
                 // Configure for recording state
+                logger.debug("🎙️ Keyboard: Updating button to recording state (Stop)")
                 self.configureButtonForRecordingState()
             } else {
                 // Configure for idle state
+                logger.debug("🎙️ Keyboard: Updating button to idle state (Record)")
                 self.configureButtonForIdleState()
+                // Stop transcript polling if recording stopped (user might have stopped from app)
+                self.stopTranscriptPolling()
             }
             
             // Ensure capsule shape is maintained
@@ -310,5 +655,21 @@ class KeyboardViewController: KeyboardInputViewController {
     override func textDidChange(_ textInput: UITextInput?) {
         // The app has just changed the document's contents
         super.textDidChange(textInput)
+        
+        // Check if there's a pending transcript when text field becomes active
+        // This ensures we insert transcript even if keyboard wasn't active when it was ready
+        if coordinator.isTranscriptReady {
+            logger.info("📝 Keyboard: Text field changed and transcript is ready, attempting to insert")
+            // Try immediately - use the more aggressive insertion method
+            attemptTranscriptInsertion()
+        }
+    }
+    
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        // Stop polling when keyboard disappears
+        stopTranscriptPolling()
+        // Note: We keep the recording status timer running so it can update
+        // when the keyboard appears again
     }
 }

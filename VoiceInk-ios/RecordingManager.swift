@@ -50,6 +50,7 @@ final class RecordingManager: ObservableObject {
 
     private let sessionManager = AudioSessionManager.shared
     private let coordinator = AppGroupCoordinator.shared
+    private var wasStoppedFromKeyboard = false
     
     var isRecording: Bool {
         recordingState == .recording
@@ -69,12 +70,22 @@ final class RecordingManager: ObservableObject {
     // MARK: - Coordinator Setup
     private func setupCoordinatorCallbacks() {
         coordinator.onStopRecordingRequested = { [weak self] in
-            guard let self = self, self.isRecording else { return }
-            // This will be called when keyboard extension requests stop
-            print("🛑 Stop recording requested from keyboard extension")
+            guard let self = self else {
+                print("⚠️ RecordingManager callback: self is nil")
+                return
+            }
+            print("🛑 Stop recording requested from keyboard extension, isRecording: \(self.isRecording)")
+            guard self.isRecording else {
+                print("⚠️ Stop requested but not currently recording")
+                return
+            }
+            // Mark that this was stopped from keyboard
+            self.wasStoppedFromKeyboard = true
+            print("🛑 Posting stopRecordingFromKeyboard notification")
             // We need modelContext, so we'll handle this via a notification instead
             NotificationCenter.default.post(name: .stopRecordingFromKeyboard, object: nil)
         }
+        print("✅ RecordingManager: Coordinator callbacks set up")
     }
     
     // MARK: - Recording Flow (Simplified)
@@ -134,6 +145,14 @@ final class RecordingManager: ObservableObject {
         let audioFileName = fileURL.lastPathComponent
         let recordingDuration = currentDuration
         
+        // Check if this was stopped from keyboard (before resetting the flag)
+        let shouldStoreTranscript = wasStoppedFromKeyboard
+        
+        // If stopped from keyboard, clear any old transcript first
+        if shouldStoreTranscript {
+            coordinator.clearOldTranscript()
+        }
+        
         // IMMEDIATELY create and insert the note with pending status
         let note = Transcription(
             text: "",
@@ -153,8 +172,11 @@ final class RecordingManager: ObservableObject {
         // Update coordinator state
         coordinator.updateRecordingState(false)
         
+        // Reset the flag after checking
+        wasStoppedFromKeyboard = false
+        
         // Start background transcription
-        transcribeInBackground(note: note, audioFileName: audioFileName, recordingDuration: recordingDuration, modelContext: modelContext)
+        transcribeInBackground(note: note, audioFileName: audioFileName, recordingDuration: recordingDuration, modelContext: modelContext, shouldStoreTranscript: shouldStoreTranscript)
     }
     
     func cancelRecording() {
@@ -164,6 +186,7 @@ final class RecordingManager: ObservableObject {
         animate = false
         isRecordingSheetPresented = false
         currentDuration = 0
+        wasStoppedFromKeyboard = false
         
         // Update coordinator state
         coordinator.updateRecordingState(false)
@@ -209,7 +232,7 @@ final class RecordingManager: ObservableObject {
     }
     
     // MARK: - Transcription
-    private func transcribeInBackground(note: Transcription, audioFileName: String, recordingDuration: Double, modelContext: ModelContext) {
+    private func transcribeInBackground(note: Transcription, audioFileName: String, recordingDuration: Double, modelContext: ModelContext, shouldStoreTranscript: Bool = false) {
         Task {
             defer { 
                 // Clean up recorder state
@@ -280,6 +303,15 @@ final class RecordingManager: ObservableObject {
                     note.transcriptionStatus = .completed
                     note.transcriptionError = postProcessingError
                     try? modelContext.save()
+                    
+                    // If this was stopped from keyboard, store transcript for keyboard to retrieve
+                    if shouldStoreTranscript {
+                        // Use enhanced text if available, otherwise use cleaned text
+                        let textToStore = enhancedText ?? cleanedText
+                        if !textToStore.isEmpty {
+                            coordinator.storeTranscript(textToStore)
+                        }
+                    }
                 }
                 
             } catch {
@@ -288,6 +320,11 @@ final class RecordingManager: ObservableObject {
                     note.transcriptionStatus = .failed
                     note.transcriptionError = error.localizedDescription
                     try? modelContext.save()
+                    
+                    // If this was stopped from keyboard and transcription failed, store error message
+                    if shouldStoreTranscript {
+                        coordinator.storeTranscript("Transcription failed: \(error.localizedDescription)")
+                    }
                 }
             }
         }

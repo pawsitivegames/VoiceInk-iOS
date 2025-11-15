@@ -88,8 +88,22 @@ struct NotesListView: View {
                     }
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .stopRecordingFromKeyboard)) { _ in
+                    print("🛑 NotesListView: Received stopRecordingFromKeyboard notification")
                     if recordingManager.isRecording {
+                        print("🛑 NotesListView: Stopping recording")
                         recordingManager.stopRecording(modelContext: modelContext)
+                    } else {
+                        print("⚠️ NotesListView: Stop notification received but not recording")
+                    }
+                }
+                .onAppear {
+                    // Check for stop flag when view appears
+                    let coordinator = AppGroupCoordinator.shared
+                    if coordinator.checkAndConsumeStopRecordingFlag() {
+                        print("🛑 NotesListView: Found stop flag on appear, stopping recording")
+                        if recordingManager.isRecording {
+                            NotificationCenter.default.post(name: .stopRecordingFromKeyboard, object: nil)
+                        }
                     }
                 }
         }

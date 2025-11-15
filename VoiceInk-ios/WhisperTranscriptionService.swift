@@ -52,6 +52,8 @@ struct WhisperTranscriptionService: TranscriptionService {
         let context: WhisperContext
         do {
             context = try await WhisperContext.createContext(path: modelPath)
+            // Note: If you see a warning about Core ML encoder model not found, this is expected.
+            // The Core ML encoder is an optional optimization - the library falls back to CPU automatically.
         } catch {
             print("WhisperTranscriptionService: Failed to load model: \(error)")
             throw WhisperTranscriptionError.modelLoadFailed

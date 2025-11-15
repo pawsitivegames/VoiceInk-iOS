@@ -111,17 +111,38 @@ actor WhisperContext {
     
     private func initializeModel(path: String) throws {
         var params = whisper_context_default_params()
-        #if targetEnvironment(simulator)
+        
+        // Disable GPU/Metal to avoid crashes in ggml-metal-context
+        // Metal GPU acceleration can cause fatal errors on some devices/iOS versions
         params.use_gpu = false
+        params.flash_attn = false
+        
+        #if targetEnvironment(simulator)
         logger.info("Running on the simulator, using CPU")
         #else
-        params.flash_attn = true // Enable flash attention for Metal
-        logger.info("Flash attention enabled for Metal")
+        logger.info("Using CPU for transcription (Metal GPU disabled to prevent crashes)")
         #endif
+        
+        // Check if Core ML encoder is available
+        let modelDir = (path as NSString).deletingLastPathComponent
+        let modelName = (path as NSString).lastPathComponent.replacingOccurrences(of: ".bin", with: "")
+        let coreMLEncoderPath = (modelDir as NSString).appendingPathComponent("\(modelName)-encoder.mlmodelc")
+        
+        let hasCoreMLEncoder = FileManager.default.fileExists(atPath: coreMLEncoderPath)
+        if hasCoreMLEncoder {
+            logger.info("Core ML encoder found at \(coreMLEncoderPath) - will be used for faster transcription")
+        } else {
+            logger.debug("Core ML encoder not found - using CPU (this is normal and works fine)")
+        }
         
         let context = whisper_init_from_file_with_params(path, params)
         if let context {
             self.context = context
+            if hasCoreMLEncoder {
+                logger.info("Whisper model loaded successfully with Core ML encoder optimization")
+            } else {
+                logger.info("Whisper model loaded successfully with CPU")
+            }
         } else {
             logger.error("Couldn't load model at \(path)")
             throw WhisperError.couldNotInitializeContext
