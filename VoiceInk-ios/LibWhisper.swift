@@ -156,19 +156,6 @@ actor WhisperContext {
     }
     
     private func initializeModel(path: String) throws {
-        var params = whisper_context_default_params()
-        
-        // Disable GPU/Metal to avoid crashes in ggml-metal-context
-        // Metal GPU acceleration can cause fatal errors on some devices/iOS versions
-        params.use_gpu = false
-        params.flash_attn = false
-        
-        #if targetEnvironment(simulator)
-        os_log("Running on the simulator, using CPU", log: logger, type: .info)
-        #else
-        os_log("Using CPU for transcription (Metal GPU disabled to prevent crashes)", log: logger, type: .info)
-        #endif
-        
         // Check if Core ML encoder is available
         let modelDir = (path as NSString).deletingLastPathComponent
         let modelName = (path as NSString).lastPathComponent.replacingOccurrences(of: ".bin", with: "")
@@ -181,18 +168,60 @@ actor WhisperContext {
             os_log("Core ML encoder not found - using CPU (this is normal and works fine)", log: logger, type: .debug)
         }
         
+        #if targetEnvironment(simulator)
+        // Simulator doesn't support Metal GPU
+        var params = whisper_context_default_params()
+        params.use_gpu = false
+        params.flash_attn = false
+        os_log("Running on the simulator, using CPU", log: logger, type: .info)
+        
         let context = whisper_init_from_file_with_params(path, params)
         if let context {
             self.context = context
-            if hasCoreMLEncoder {
-                os_log("Whisper model loaded successfully with Core ML encoder optimization", log: logger, type: .info)
-            } else {
-                os_log("Whisper model loaded successfully with CPU", log: logger, type: .info)
-            }
+            os_log("Whisper model loaded successfully with CPU (simulator)", log: logger, type: .info)
         } else {
             os_log("Couldn't load model at %{public}@", log: logger, type: .error, path)
             throw WhisperError.couldNotInitializeContext
         }
+        #else
+        // Try Metal GPU first for better performance, fall back to CPU if it fails
+        var gpuParams = whisper_context_default_params()
+        gpuParams.use_gpu = true
+        gpuParams.flash_attn = false
+        
+        os_log("Attempting to initialize Whisper with Metal GPU acceleration", log: logger, type: .info)
+        
+        // Try GPU first
+        if let gpuContext = whisper_init_from_file_with_params(path, gpuParams) {
+            self.context = gpuContext
+            if hasCoreMLEncoder {
+                os_log("Whisper model loaded successfully with Metal GPU + Core ML encoder", log: logger, type: .info)
+            } else {
+                os_log("Whisper model loaded successfully with Metal GPU acceleration", log: logger, type: .info)
+            }
+            return
+        }
+        
+        // GPU failed, fall back to CPU
+        os_log("Metal GPU initialization failed, falling back to CPU", log: logger, type: .default)
+        
+        var cpuParams = whisper_context_default_params()
+        cpuParams.use_gpu = false
+        cpuParams.flash_attn = false
+        
+        let context = whisper_init_from_file_with_params(path, cpuParams)
+        if let context {
+            self.context = context
+            if hasCoreMLEncoder {
+                os_log("Whisper model loaded successfully with CPU + Core ML encoder (GPU unavailable)", log: logger, type: .info)
+            } else {
+                os_log("Whisper model loaded successfully with CPU (GPU unavailable)", log: logger, type: .info)
+            }
+        } else {
+            os_log("Couldn't load model at %{public}@ (both GPU and CPU failed)", log: logger, type: .error, path)
+            throw WhisperError.couldNotInitializeContext
+        }
+        #endif
     }
     
     private func setVADModelPath(_ path: String?) {

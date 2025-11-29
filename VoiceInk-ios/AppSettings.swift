@@ -104,7 +104,11 @@ final class AppSettings: ObservableObject {
     @Published var audioSessionTimeoutSeconds: Int {
         didSet { UserDefaults.standard.set(audioSessionTimeoutSeconds, forKey: "audioSessionTimeoutSeconds") }
     }
-
+    
+    // Language configuration
+    @Published var languageConfiguration: LanguageConfiguration {
+        didSet { saveLanguageConfiguration() }
+    }
 
     private init() {
         // Load modes
@@ -128,6 +132,9 @@ final class AppSettings: ObservableObject {
         
         // Load audio session timeout (default: 90 seconds)
         self.audioSessionTimeoutSeconds = UserDefaults.standard.object(forKey: "audioSessionTimeoutSeconds") as? Int ?? 90
+        
+        // Load language configuration (default: English to Spanish)
+        self.languageConfiguration = Self.loadLanguageConfiguration()
 
     }
 
@@ -335,6 +342,23 @@ final class AppSettings: ObservableObject {
         return ""
     }
 
+    // MARK: - Language Configuration
+    
+    private func saveLanguageConfiguration() {
+        if let data = try? JSONEncoder().encode(languageConfiguration) {
+            UserDefaults.standard.set(data, forKey: "languageConfiguration")
+        }
+    }
+    
+    private static func loadLanguageConfiguration() -> LanguageConfiguration {
+        guard let data = UserDefaults.standard.data(forKey: "languageConfiguration"),
+              let config = try? JSONDecoder().decode(LanguageConfiguration.self, from: data) else {
+            // Default: English to Spanish (backward compatible)
+            return LanguageConfiguration(sourceLanguageCode: "en", targetLanguageCode: "es")
+        }
+        return config
+    }
+    
     // MARK: - Debug Reset
     /// Remove all persisted preferences, API keys, and modes.
     func resetAll() {
@@ -360,6 +384,10 @@ final class AppSettings: ObservableObject {
         // Reset audio session timeout to default
         audioSessionTimeoutSeconds = 90
         UserDefaults.standard.removeObject(forKey: "audioSessionTimeoutSeconds")
+        
+        // Reset language configuration to default
+        languageConfiguration = LanguageConfiguration(sourceLanguageCode: "en", targetLanguageCode: "es")
+        UserDefaults.standard.removeObject(forKey: "languageConfiguration")
 
         // Clear API keys from memory and Keychain
         groqAPIKey = ""

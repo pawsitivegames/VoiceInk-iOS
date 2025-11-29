@@ -153,7 +153,7 @@ struct ModelDownloadOnboardingView: View {
                                 .foregroundColor(.green)
                                 .font(.title)
                         } else if modelManager.isDownloading[baseModel.id] == true {
-                            ProgressView()
+                            LoadingSpinner(size: 20)
                         } else {
                             Image(systemName: "icloud.and.arrow.down")
                                 .foregroundColor(.accentColor)

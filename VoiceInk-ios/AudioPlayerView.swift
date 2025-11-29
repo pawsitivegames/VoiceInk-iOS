@@ -33,10 +33,7 @@ struct AudioPlayerView: View {
             if player.isLoading {
                 // Simple loading state
                 HStack(spacing: 12) {
-                    ProgressView()
-                        .scaleEffect(0.8)
-                        .tint(.blue)
-                        .id("audio-loading") // Stable ID to help SwiftUI optimize rendering
+                    LoadingSpinner(color: .blue, size: 16)
                     
                     Text("Loading...")
                         .font(.subheadline)
@@ -46,7 +43,6 @@ struct AudioPlayerView: View {
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 16)
-                .drawingGroup() // Isolate rendering to prevent flattening issues
             } else {
                 // Clean player interface
                 HStack(spacing: 16) {

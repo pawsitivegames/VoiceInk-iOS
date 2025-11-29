@@ -3,10 +3,12 @@ import SwiftData
 import AVFoundation
 import Combine
 import UIKit
+import Foundation
 
 extension Notification.Name {
     static let stopRecordingFromKeyboard = Notification.Name("stopRecordingFromKeyboard")
     static let recordingStarted = Notification.Name("recordingStarted")
+    static let translationCompleted = Notification.Name("translationCompleted")
 }
 
 enum RecordingState: Equatable {
@@ -43,10 +45,11 @@ final class RecordingManager: ObservableObject {
     @Published var activeRecordingAlert: ActiveRecordingAlert?
     @Published var currentRecordingNote: Transcription?
     @Published var currentDuration: Double = 0
+    @Published var processingNote: Transcription? // Temporary note being processed (not in SwiftData yet)
     
     private let recorder = AudioRecorder()
     private let postProcessor = LLMPostProcessor()
-    private let translationService = TranslationService()
+    private let translationService = TranslationService.shared
     private let settings = AppSettings.shared
     private var durationTimer: Timer?
     
@@ -399,16 +402,14 @@ final class RecordingManager: ObservableObject {
             coordinator.clearOldTranscript()
         }
         
-        // IMMEDIATELY create and insert the note with pending status
+        // Create note in memory (NOT inserted into SwiftData yet)
+        // Will only be inserted when translation completes
         let note = Transcription(
             text: "",
             duration: recordingDuration,
             audioFileURL: audioFileName,
             transcriptionStatus: .pending
         )
-        modelContext.insert(note)
-        modelContext.processPendingChanges()
-        try? modelContext.save()
         
         // Atomically update all related state to keep everything in sync
         stateQueue.sync {
@@ -416,12 +417,12 @@ final class RecordingManager: ObservableObject {
             wasStoppedFromKeyboard = false
         }
         
-        // Reset UI state immediately so user can continue using the app
-        // Batch related state updates to reduce view re-renders
+        // Set processing state and store note temporarily
         withAnimation {
-            recordingState = .idle
+            recordingState = .processing
             animate = false
-            currentRecordingNote = note
+            processingNote = note
+            currentRecordingNote = nil
             isRecordingSheetPresented = false
         }
         
@@ -432,7 +433,8 @@ final class RecordingManager: ObservableObject {
         // The session will stay active for the 10-minute window
         // The timeout will be extended on the next recording start
         
-        // Start background transcription
+        // Start background transcription and translation
+        // Note will only be inserted when translation completes
         transcribeInBackground(note: note, audioFileName: audioFileName, recordingDuration: recordingDuration, modelContext: modelContext, shouldStoreTranscript: shouldStoreTranscript)
     }
     
@@ -551,14 +553,26 @@ final class RecordingManager: ObservableObject {
             let model = settings.effectiveTranscriptionModel
             Logger.debug("Transcription provider: \(provider), model: \(model)", category: "RecordingManager")
             
-            // If no API key, update note with error
+            // If no API key, update note with error and insert into SwiftData
             guard !apiKey.isEmpty else {
                 Logger.error("No API key configured for provider: \(provider)", category: "RecordingManager")
                 await MainActor.run {
                     note.transcriptionStatus = .failed
                     note.transcriptionError = "No API key configured"
+                    // Insert note even on error so user can see what failed
+                    modelContext.insert(note)
                     modelContext.processPendingChanges()
                     try? modelContext.save()
+                    
+                    // Clear processing state immediately
+                    processingNote = nil
+                    recordingState = .idle
+                    
+                    // Defer cleanup
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second delay
+                        cleanupOldRecordings(modelContext: modelContext)
+                    }
                 }
                 return
             }
@@ -588,53 +602,58 @@ final class RecordingManager: ObservableObject {
                             try? FileManager.default.removeItem(atPath: audioPath)
                         }
                         modelContext.delete(note)
+                        modelContext.processPendingChanges()
                         do {
                             try modelContext.save()
                             Logger.info("Note deleted successfully (no audio detected)", category: "RecordingManager")
                         } catch {
                             Logger.error("Failed to delete note: \(error.localizedDescription)", category: "RecordingManager")
                         }
+                        
+                        // Clear processing state and reset to idle
+                        processingNote = nil
+                        recordingState = .idle
                     }
                     return // Exit early, don't process further
                 }
                 
-                // Detect language early to apply Spanish correction if needed
+                // Detect language early to apply transcription correction if needed
                 let preliminaryLanguage = detectLanguage(from: cleanedText)
                 Logger.debug("Preliminary language detection: \(preliminaryLanguage ?? "en (default)")", category: "RecordingManager")
                 
-                // PERFORMANCE FIX: Update UI immediately with raw transcription (don't wait for enhancements)
-                // This allows users to see the text right away while enhancements happen in background
+                // Update note in memory (not in SwiftData yet - will be inserted when translation completes)
                 await MainActor.run {
-                    Logger.debug("Updating note immediately with raw transcription (length: \(cleanedText.count))", category: "RecordingManager")
+                    Logger.debug("Updating note in memory with raw transcription (length: \(cleanedText.count))", category: "RecordingManager")
                     
                     note.text = cleanedText
                     note.transcriptionModelName = model
                     note.transcriptionStatus = .completed
-                    
-                    do {
-                        modelContext.processPendingChanges()
-                        try modelContext.save()
-                        Logger.info("Note updated immediately with raw transcription", category: "RecordingManager")
-                    } catch {
-                        Logger.error("Failed to save note: \(error.localizedDescription)", category: "RecordingManager")
-                    }
+                    // Note: Not saving yet - will insert into SwiftData when translation completes
                 }
                 
                 // PERFORMANCE OPTIMIZATION: Start translation early in parallel with enhancements
                 // This allows translation to happen concurrently instead of waiting for all processing
                 let detectedLanguageForTranslation = preliminaryLanguage ?? "en"
-                let translationTask: Task<String?, Never>? = !cleanedText.isEmpty ? Task { [weak self] in
+                // Capture language configuration before entering Task
+                let langConfig = settings.languageConfiguration
+                // Helper struct to hold translation result with language code
+                struct TranslationResult {
+                    let text: String
+                    let targetLanguageCode: String
+                }
+                let translationTask: Task<TranslationResult?, Never>? = !cleanedText.isEmpty ? Task { [weak self] in
                     guard let self = self else { return nil }
                     Logger.debug("Starting early translation in parallel with enhancements", category: "RecordingManager")
                     do {
+                        let oppositeCode = langConfig.oppositeLanguageCode(for: detectedLanguageForTranslation)
                         let translatedText = try await withThrowingTaskGroup(of: String.self) { group in
                             // Add translation task
                             group.addTask {
-                                if detectedLanguageForTranslation == "es" {
-                                    return try await self.translationService.translateToEnglish(text: cleanedText)
-                                } else {
-                                    return try await self.translationService.translateToSpanish(text: cleanedText)
-                                }
+                                return try await self.translationService.translate(
+                                    text: cleanedText,
+                                    from: detectedLanguageForTranslation,
+                                    to: oppositeCode
+                                )
                             }
                             
                             // Add timeout task (reduced from 30s to 15s for faster fallback)
@@ -650,7 +669,7 @@ final class RecordingManager: ObservableObject {
                             return result
                         }
                         Logger.info("Early translation completed! Length: \(translatedText.count)", category: "RecordingManager")
-                        return translatedText
+                        return TranslationResult(text: translatedText, targetLanguageCode: oppositeCode)
                     } catch {
                         Logger.warning("Early translation failed: \(error.localizedDescription), will retry with enhanced text if available", category: "RecordingManager")
                         return nil
@@ -662,35 +681,38 @@ final class RecordingManager: ObservableObject {
                 var postProcessingError: String? = nil
                 var finalText = cleanedText
                 
-                // Automatic Spanish correction for better accuracy with accents (runs before user's post-processing)
-                if preliminaryLanguage == "es" && !cleanedText.isEmpty {
-                    Logger.debug("Spanish detected - applying automatic correction in background", category: "RecordingManager")
+                // Automatic transcription correction for better accuracy with accents (runs before user's post-processing)
+                // Only apply if detected language matches target language (user is practicing target language)
+                let detectedLangCode = preliminaryLanguage ?? settings.languageConfiguration.sourceLanguageCode
+                if detectedLangCode == settings.languageConfiguration.targetLanguageCode && !cleanedText.isEmpty {
+                    Logger.debug("\(LanguageHelper.languageName(for: detectedLangCode)) detected - applying automatic correction in background", category: "RecordingManager")
                     let llmProvider = settings.effectivePostProcessingProvider
                     let llmKey = settings.apiKey(for: llmProvider)
                     let llmModel = settings.effectivePostProcessingModel
                     
                     if !llmKey.isEmpty {
                         do {
-                            let correctedText = try await postProcessor.correctSpanishTranscription(
+                            let correctedText = try await postProcessor.correctTranscription(
                                 provider: llmProvider,
                                 apiKey: llmKey,
                                 model: llmModel,
-                                transcript: cleanedText
+                                transcript: cleanedText,
+                                languageCode: detectedLangCode
                             )
                             finalText = correctedText
                             enhancedText = correctedText
-                            Logger.info("Spanish transcription corrected successfully", category: "RecordingManager")
+                            Logger.info("\(LanguageHelper.languageName(for: detectedLangCode)) transcription corrected successfully", category: "RecordingManager")
                         } catch {
-                            Logger.warning("Spanish correction failed: \(error.localizedDescription), using original transcription", category: "RecordingManager")
+                            Logger.warning("Transcription correction failed: \(error.localizedDescription), using original transcription", category: "RecordingManager")
                             // Continue with original text if correction fails
                             finalText = cleanedText
                         }
                     } else {
-                        Logger.warning("No API key for Spanish correction, skipping automatic correction", category: "RecordingManager")
+                        Logger.warning("No API key for transcription correction, skipping automatic correction", category: "RecordingManager")
                     }
                 }
                 
-                // Optional user-configured post-processing (runs after Spanish correction if applicable)
+                // Optional user-configured post-processing (runs after transcription correction if applicable)
                 if settings.effectiveIsPostProcessingEnabled {
                     let ppPrompt = settings.effectiveCustomPrompt
                     if !ppPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -717,6 +739,9 @@ final class RecordingManager: ObservableObject {
                 let detectedLanguage = detectLanguage(from: textToTranslate)
                 // detectLanguage only returns "en" or "es" (or nil, which defaults to English)
                 Logger.debug("Detected language: \(detectedLanguage ?? "en (default)")", category: "RecordingManager")
+                
+                // Capture language configuration for translation
+                let langConfigForTranslation = settings.languageConfiguration
                 
                 // PERFORMANCE OPTIMIZATION: Batch all enhancement updates into a single save
                 // This reduces blocking operations from multiple saves to just one
@@ -745,10 +770,8 @@ final class RecordingManager: ObservableObject {
                         }
                     }
                     
-                    // Single save for all enhancements
-                    modelContext.processPendingChanges()
-                    try? modelContext.save()
-                    Logger.debug("Note updated with all enhancements in single save", category: "RecordingManager")
+                    // Note: Not saving yet - will insert into SwiftData when translation completes
+                    Logger.debug("Note updated in memory with all enhancements", category: "RecordingManager")
                 }
                 
                 // Handle translation: use early translation if available, otherwise translate enhanced text
@@ -756,24 +779,26 @@ final class RecordingManager: ObservableObject {
                     Logger.debug("Processing translation for text: '\(textToTranslate.prefix(50))...'", category: "RecordingManager")
                     
                     // Wait for early translation if it's still running, or start new translation with enhanced text
-                    let translatedText: String?
+                    let translationResult: TranslationResult?
                     if let earlyTask = translationTask {
                         // Check if early translation completed
                         if let earlyResult = await earlyTask.value {
-                            translatedText = earlyResult
+                            translationResult = earlyResult
                             Logger.debug("Using early translation result", category: "RecordingManager")
                         } else {
                             // Early translation failed or timed out, try again with enhanced text if different
                             if textToTranslate != cleanedText {
                                 Logger.debug("Retrying translation with enhanced text", category: "RecordingManager")
                                 do {
-                                    translatedText = try await withThrowingTaskGroup(of: String.self) { group in
+                                    let detectedLang = detectedLanguage ?? langConfigForTranslation.sourceLanguageCode
+                                    let oppositeCode = langConfigForTranslation.oppositeLanguageCode(for: detectedLang)
+                                    let translatedText = try await withThrowingTaskGroup(of: String.self) { group in
                                         group.addTask {
-                                            if detectedLanguage == "es" {
-                                                return try await self.translationService.translateToEnglish(text: textToTranslate)
-                                            } else {
-                                                return try await self.translationService.translateToSpanish(text: textToTranslate)
-                                            }
+                                            return try await self.translationService.translate(
+                                                text: textToTranslate,
+                                                from: detectedLang,
+                                                to: oppositeCode
+                                            )
                                         }
                                         group.addTask {
                                             try await Task.sleep(nanoseconds: 15_000_000_000) // 15 seconds
@@ -783,24 +808,27 @@ final class RecordingManager: ObservableObject {
                                         group.cancelAll()
                                         return result
                                     }
+                                    translationResult = TranslationResult(text: translatedText, targetLanguageCode: oppositeCode)
                                 } catch {
                                     Logger.error("Retry translation failed: \(error.localizedDescription)", category: "RecordingManager")
-                                    translatedText = nil
+                                    translationResult = nil
                                 }
                             } else {
-                                translatedText = nil
+                                translationResult = nil
                             }
                         }
                     } else {
                         // No early translation task, translate now
                         do {
-                            translatedText = try await withThrowingTaskGroup(of: String.self) { group in
+                            let detectedLang = detectedLanguage ?? langConfigForTranslation.sourceLanguageCode
+                            let oppositeCode = langConfigForTranslation.oppositeLanguageCode(for: detectedLang)
+                            let translatedText = try await withThrowingTaskGroup(of: String.self) { group in
                                 group.addTask {
-                                    if detectedLanguage == "es" {
-                                        return try await self.translationService.translateToEnglish(text: textToTranslate)
-                                    } else {
-                                        return try await self.translationService.translateToSpanish(text: textToTranslate)
-                                    }
+                                    return try await self.translationService.translate(
+                                        text: textToTranslate,
+                                        from: detectedLang,
+                                        to: oppositeCode
+                                    )
                                 }
                                 group.addTask {
                                     try await Task.sleep(nanoseconds: 15_000_000_000) // 15 seconds
@@ -810,40 +838,140 @@ final class RecordingManager: ObservableObject {
                                 group.cancelAll()
                                 return result
                             }
+                            translationResult = TranslationResult(text: translatedText, targetLanguageCode: oppositeCode)
                         } catch {
                             Logger.error("Translation failed: \(error.localizedDescription)", category: "RecordingManager")
-                            translatedText = nil
+                            translationResult = nil
                         }
                     }
                     
-                    // Update note with translation on main thread (single save)
-                    if let translated = translatedText {
-                        await MainActor.run {
-                            note.translatedText = translated
-                            modelContext.processPendingChanges()
-                            try? modelContext.save()
-                            Logger.info("Translation completed and saved! Length: \(translated.count)", category: "RecordingManager")
+                    // Update note with translation on main thread, then INSERT into SwiftData
+                    // OPTIMIZATION: Batch all operations into a single save
+                    await MainActor.run {
+                        if let result = translationResult {
+                            note.translatedText = result.text
+                            note.translatedLanguageCode = result.targetLanguageCode
+                            Logger.info("Translation completed! Length: \(result.text.count)", category: "RecordingManager")
                         }
+                        
+                        // Insert note into SwiftData (only once, when everything is ready)
+                        modelContext.insert(note)
+                        modelContext.processPendingChanges()
+                        try? modelContext.save()
+                        Logger.info("Note inserted into SwiftData", category: "RecordingManager")
+                        
+                        // Clear processing state and reset to idle BEFORE cleanup
+                        // This allows UI to update immediately
+                        processingNote = nil
+                        recordingState = .idle
+                        
+                        // Defer cleanup to avoid blocking UI update
+                        // This prevents the cleanup save from interfering with the insert
+                        Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second delay
+                            cleanupOldRecordings(modelContext: modelContext)
+                        }
+                        
+                        // Note: No notification needed - SwiftData @Query will auto-update
                     }
                 } else {
+                    // Text to translate is empty, insert note without translation
                     Logger.warning("Text to translate is empty, skipping translation", category: "RecordingManager")
+                    await MainActor.run {
+                        modelContext.insert(note)
+                        modelContext.processPendingChanges()
+                        try? modelContext.save()
+                        
+                        // Clear processing state immediately
+                        processingNote = nil
+                        recordingState = .idle
+                        
+                        // Defer cleanup
+                        Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second delay
+                            cleanupOldRecordings(modelContext: modelContext)
+                        }
+                    }
                 }
                 
             } catch {
-                // Update note with error on main thread
+                // Update note with error on main thread, then INSERT into SwiftData
                 Logger.error("Transcription failed with error: \(error.localizedDescription)", category: "RecordingManager")
                 await MainActor.run {
                     note.transcriptionStatus = .failed
                     note.transcriptionError = error.localizedDescription
+                    // Insert note even on error so user can see what failed
+                    modelContext.insert(note)
                     modelContext.processPendingChanges()
                     try? modelContext.save()
+                    
+                    // Clear processing state immediately
+                    processingNote = nil
+                    recordingState = .idle
                     
                     // If this was stopped from keyboard and transcription failed, store error message
                     if shouldStoreTranscript {
                         let errorMessage = "Transcription failed: \(error.localizedDescription)"
                         coordinator.storeTranscript(errorMessage)
                     }
+                    
+                    // Defer cleanup
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second delay
+                        cleanupOldRecordings(modelContext: modelContext)
+                    }
                 }
+            }
+        }
+    }
+    
+    // MARK: - Cleanup
+    
+    /// Keep only the last 10 recordings and delete older ones
+    /// OPTIMIZATION: This is called with a delay to avoid interfering with UI updates
+    private func cleanupOldRecordings(modelContext: ModelContext) {
+        Task { @MainActor in
+            do {
+                // Fetch all transcriptions sorted by timestamp (newest first)
+                let descriptor = FetchDescriptor<Transcription>(
+                    sortBy: [SortDescriptor(\Transcription.timestamp, order: .reverse)]
+                )
+                let allNotes = try modelContext.fetch(descriptor)
+                
+                // If we have more than 10, delete the oldest ones
+                if allNotes.count > 10 {
+                    let notesToDelete = Array(allNotes.suffix(from: 10))
+                    Logger.info("Cleaning up \(notesToDelete.count) old recordings (keeping last 10)", category: "RecordingManager")
+                    
+                    // Collect audio paths to delete before deleting notes
+                    var audioPathsToDelete: [String] = []
+                    for note in notesToDelete {
+                        if let audioPath = note.fullAudioPath, FileManager.default.fileExists(atPath: audioPath) {
+                            audioPathsToDelete.append(audioPath)
+                        }
+                    }
+                    
+                    // Delete notes in batch
+                    for note in notesToDelete {
+                        modelContext.delete(note)
+                    }
+                    
+                    // OPTIMIZATION: Single save operation for all deletions
+                    modelContext.processPendingChanges()
+                    try modelContext.save()
+                    
+                    // Delete audio files after database is updated (non-blocking)
+                    Task.detached(priority: .utility) {
+                        for audioPath in audioPathsToDelete {
+                            try? FileManager.default.removeItem(atPath: audioPath)
+                            Logger.debug("Deleted audio file: \(audioPath)", category: "RecordingManager")
+                        }
+                    }
+                    
+                    Logger.info("Successfully cleaned up old recordings", category: "RecordingManager")
+                }
+            } catch {
+                Logger.error("Failed to cleanup old recordings: \(error.localizedDescription)", category: "RecordingManager")
             }
         }
     }

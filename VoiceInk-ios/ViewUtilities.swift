@@ -9,6 +9,29 @@ import Foundation
 import SwiftUI
 import UIKit
 
+// MARK: - Custom Loading Indicator
+
+/// Custom SwiftUI-only loading spinner to avoid UIKit rendering issues
+/// This replaces ProgressView() which causes "Unable to render flattened version" warnings
+struct LoadingSpinner: View {
+    @State private var isAnimating = false
+    var color: Color = .secondary
+    var lineWidth: CGFloat = 2
+    var size: CGFloat = 16
+    
+    var body: some View {
+        Circle()
+            .trim(from: 0.0, to: 0.7)
+            .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+            .rotationEffect(Angle(degrees: isAnimating ? 360 : 0))
+            .animation(.linear(duration: 1).repeatForever(autoreverses: false), value: isAnimating)
+            .frame(width: size, height: size)
+            .onAppear {
+                isAnimating = true
+            }
+    }
+}
+
 // MARK: - Shared Formatters
 
 /// Shared RelativeDateTimeFormatter instance to avoid recreation on every render

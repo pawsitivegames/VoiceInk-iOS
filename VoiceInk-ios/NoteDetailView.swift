@@ -163,9 +163,7 @@ struct NoteDetailView: View {
                     if note.transcriptionStatus == .completed && note.translatedText == nil {
                         // Translation pending indicator
                         HStack(spacing: 8) {
-                            ProgressView()
-                                .scaleEffect(0.8)
-                                .id("translation-pending-\(note.id)") // Stable ID to help SwiftUI optimize rendering
+                            LoadingSpinner(size: 16)
                             Text("Translation pending...")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
@@ -174,7 +172,6 @@ struct NoteDetailView: View {
                         .frame(maxWidth: .infinity)
                         .background(Color(.tertiarySystemGroupedBackground))
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .drawingGroup() // Isolate rendering to prevent flattening issues
                     }
                 }
             }
@@ -201,38 +198,38 @@ struct NoteDetailView: View {
     
     /// Get the primary language label based on detected language
     private var primaryLanguageLabel: String {
-        if note.detectedLanguage == "es" {
-            return "Spanish"
-        } else {
-            return "English"
-        }
+        let detectedLang = note.detectedLanguage ?? settings.languageConfiguration.sourceLanguageCode
+        return LanguageHelper.languageName(for: detectedLang)
     }
     
-    /// Get the translation language label based on detected language
+    /// Get the translation language label based on stored translatedLanguageCode or detected language
     private var translationLanguageLabel: String {
-        if note.detectedLanguage == "es" {
-            return "English"
-        } else {
-            return "Spanish"
+        // Use stored translatedLanguageCode if available (preserves original translation language)
+        if let storedCode = note.translatedLanguageCode {
+            return LanguageHelper.languageName(for: storedCode)
         }
+        // Fallback to calculating from current language configuration (for backward compatibility)
+        let detectedLang = note.detectedLanguage ?? settings.languageConfiguration.sourceLanguageCode
+        let oppositeCode = settings.languageConfiguration.oppositeLanguageCode(for: detectedLang)
+        return LanguageHelper.languageName(for: oppositeCode)
     }
     
     /// Get the primary language flag emoji
     private var primaryLanguageFlag: String {
-        if note.detectedLanguage == "es" {
-            return "🇪🇸"
-        } else {
-            return "🇺🇸"
-        }
+        let detectedLang = note.detectedLanguage ?? settings.languageConfiguration.sourceLanguageCode
+        return LanguageHelper.flag(for: detectedLang)
     }
     
-    /// Get the translation language flag emoji
+    /// Get the translation language flag emoji based on stored translatedLanguageCode or detected language
     private var translationLanguageFlag: String {
-        if note.detectedLanguage == "es" {
-            return "🇺🇸"
-        } else {
-            return "🇪🇸"
+        // Use stored translatedLanguageCode if available (preserves original translation language)
+        if let storedCode = note.translatedLanguageCode {
+            return LanguageHelper.flag(for: storedCode)
         }
+        // Fallback to calculating from current language configuration (for backward compatibility)
+        let detectedLang = note.detectedLanguage ?? settings.languageConfiguration.sourceLanguageCode
+        let oppositeCode = settings.languageConfiguration.oppositeLanguageCode(for: detectedLang)
+        return LanguageHelper.flag(for: oppositeCode)
     }
     
     // Lazy evaluation - only check file existence when needed
@@ -330,14 +327,11 @@ struct NoteDetailView: View {
             
             if isRetranscribing {
                 HStack {
-                    ProgressView()
-                        .scaleEffect(0.8)
-                        .id("retranscribing-\(note.id)") // Stable ID to help SwiftUI optimize rendering
+                    LoadingSpinner(size: 16)
                     Text("Retranscribing...")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
-                .drawingGroup() // Isolate rendering to prevent flattening issues
             } else {
                 Button {
                     retranscribe()
@@ -365,6 +359,7 @@ struct NoteDetailView: View {
                 _ = try await TranscriptionRetryService.shared.retranscribe(note: note)
                 modelContext.processPendingChanges()
                 try? modelContext.save() // Save the updated note
+                // Note: No notification needed - SwiftData @Query will auto-update
             } catch {
                 // Error handling is already done in the service
             }

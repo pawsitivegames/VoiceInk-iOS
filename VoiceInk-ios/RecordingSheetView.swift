@@ -7,6 +7,12 @@ struct RecordingSheetView: View {
     let onCancel: () -> Void
     let onStop: () -> Void
     
+    private var languageHintText: String {
+        let sourceName = LanguageHelper.languageName(for: settings.languageConfiguration.sourceLanguageCode)
+        let targetName = LanguageHelper.languageName(for: settings.languageConfiguration.targetLanguageCode)
+        return "Speak in \(sourceName) or \(targetName) to see instant translations"
+    }
+    
     var body: some View {
         VStack(spacing: 20) {
             // Header
@@ -31,7 +37,7 @@ struct RecordingSheetView: View {
                 Image(systemName: "lightbulb.fill")
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(.orange)
-                Text("Speak in English or Spanish to see instant translations")
+                Text(languageHintText)
                     .font(.system(size: 13, weight: .regular))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.leading)
@@ -44,7 +50,7 @@ struct RecordingSheetView: View {
                     .fill(Color(.tertiarySystemGroupedBackground))
             )
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("Hint: Speak in English or Spanish to see instant translations")
+            .accessibilityLabel("Hint: \(languageHintText)")
 
             // Mode Picker
             VStack(spacing: 10) {

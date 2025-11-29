@@ -47,6 +47,66 @@ struct SettingsView: View {
                 }
             }
             
+            Section(header: Text("Language Settings")) {
+                // Source Language Picker
+                NavigationLink(destination: LanguageSelectionView(
+                    title: "Source Language",
+                    selectedLanguageCode: $settings.languageConfiguration.sourceLanguageCode,
+                    excludedLanguageCode: nil
+                )) {
+                    HStack {
+                        Text("Source Language")
+                        Spacer()
+                        HStack(spacing: 6) {
+                            Text(LanguageHelper.flag(for: settings.languageConfiguration.sourceLanguageCode))
+                            Text(LanguageHelper.languageName(for: settings.languageConfiguration.sourceLanguageCode))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .onChange(of: settings.languageConfiguration.sourceLanguageCode) { oldValue, newValue in
+                    // If source and target are the same, change target to a different language
+                    if newValue == settings.languageConfiguration.targetLanguageCode {
+                        // Find a different language
+                        if let differentLang = LanguageHelper.allLanguages.first(where: { $0.code != newValue }) {
+                            settings.languageConfiguration.targetLanguageCode = differentLang.code
+                        }
+                    }
+                }
+                
+                // Target Language Picker
+                NavigationLink(destination: LanguageSelectionView(
+                    title: "Target Language",
+                    selectedLanguageCode: $settings.languageConfiguration.targetLanguageCode,
+                    excludedLanguageCode: settings.languageConfiguration.sourceLanguageCode
+                )) {
+                    HStack {
+                        Text("Target Language")
+                        Spacer()
+                        HStack(spacing: 6) {
+                            Text(LanguageHelper.flag(for: settings.languageConfiguration.targetLanguageCode))
+                            Text(LanguageHelper.languageName(for: settings.languageConfiguration.targetLanguageCode))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .onChange(of: settings.languageConfiguration.targetLanguageCode) { oldValue, newValue in
+                    // If target and source are the same, change source to a different language
+                    if newValue == settings.languageConfiguration.sourceLanguageCode {
+                        // Find a different language
+                        if let differentLang = LanguageHelper.allLanguages.first(where: { $0.code != newValue }) {
+                            settings.languageConfiguration.sourceLanguageCode = differentLang.code
+                        }
+                    }
+                }
+                
+                Text("The app will translate between these two languages. Source is the language you speak, target is what you're learning.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 4)
+            }
+            
             Section(header: Text("Audio Settings")) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {

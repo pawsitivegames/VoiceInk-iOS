@@ -3,62 +3,134 @@ import Foundation
 @preconcurrency import MLKitTranslate
 #endif
 
-struct TranslationService {
+class TranslationService {
+    // Singleton to ensure only one instance and prevent multiple ML Kit uploaders
+    static let shared = TranslationService()
+    
     #if canImport(MLKitTranslate)
-    // Cache translator instances as static properties (performance optimization)
-    // Using static to avoid struct mutability issues
-    private static var cachedTranslator: Translator? = {
-        let options = TranslatorOptions(sourceLanguage: .english, targetLanguage: .spanish)
-        return Translator.translator(options: options)
-    }()
+    // Cache translator instances dynamically based on language pair
+    // Key format: "sourceCode-targetCode" (e.g., "en-es", "es-en")
+    private static var translatorCache: [String: Translator] = [:]
+    private static let cacheQueue = DispatchQueue(label: "com.pawsitivegames.voiceink.translatorCache")
     
-    private static var cachedTranslatorSpanishToEnglish: Translator? = {
-        let options = TranslatorOptions(sourceLanguage: .spanish, targetLanguage: .english)
-        return Translator.translator(options: options)
-    }()
-    
-    // Helper to get translator instances
-    private var translator: Translator? {
-        Self.cachedTranslator
+    /// Get or create a translator for a specific language pair
+    private func getTranslator(sourceCode: String, targetCode: String) -> Translator? {
+        let key = "\(sourceCode)-\(targetCode)"
+        
+        return Self.cacheQueue.sync {
+            if let cached = Self.translatorCache[key] {
+                return cached
+            }
+            
+            // Map language codes to ML Kit TranslateLanguage
+            guard let sourceLang = mapLanguageCodeToMLKit(sourceCode),
+                  let targetLang = mapLanguageCodeToMLKit(targetCode) else {
+                Logger.warning("Unsupported language pair for ML Kit: \(sourceCode) → \(targetCode)", category: "TranslationService")
+                return nil
+            }
+            
+            let options = TranslatorOptions(sourceLanguage: sourceLang, targetLanguage: targetLang)
+            let translator = Translator.translator(options: options)
+            Self.translatorCache[key] = translator
+            return translator
+        }
     }
     
-    private var translatorSpanishToEnglish: Translator? {
-        Self.cachedTranslatorSpanishToEnglish
+    /// Map language code to ML Kit TranslateLanguage enum
+    private func mapLanguageCodeToMLKit(_ code: String) -> TranslateLanguage? {
+        switch code.lowercased() {
+        case "en": return .english
+        case "es": return .spanish
+        case "fr": return .french
+        case "de": return .german
+        case "it": return .italian
+        case "pt": return .portuguese
+        case "ar": return .arabic
+        case "zh": return .chinese
+        case "ja": return .japanese
+        case "ko": return .korean
+        case "ru": return .russian
+        case "hi": return .hindi
+        case "nl": return .dutch
+        case "pl": return .polish
+        case "tr": return .turkish
+        case "sv": return .swedish
+        case "da": return .danish
+        case "no": return .norwegian
+        case "fi": return .finnish
+        case "cs": return .czech
+        case "ro": return .romanian
+        case "hu": return .hungarian
+        case "el": return .greek
+        case "he": return .hebrew
+        case "th": return .thai
+        case "vi": return .vietnamese
+        case "id": return .indonesian
+        case "ms": return .malay
+        case "uk": return .ukrainian
+        case "bg": return .bulgarian
+        case "hr": return .croatian
+        case "sk": return .slovak
+        case "sl": return .slovenian
+        case "et": return .estonian
+        case "lv": return .latvian
+        case "lt": return .lithuanian
+        case "mt": return .maltese
+        case "ga": return .irish
+        case "cy": return .welsh
+        case "is": return .icelandic
+        case "mk": return .macedonian
+        case "sq": return .albanian
+        // Note: Serbian, Bosnian, and Montenegrin are not directly supported by ML Kit
+        // They will fall back to LLM API translation
+        case "sr", "bs", "me":
+            Logger.debug("Language \(code) not directly supported by ML Kit, will use LLM API fallback", category: "TranslationService")
+            return nil
+        default:
+            Logger.warning("Unsupported ML Kit language code: \(code)", category: "TranslationService")
+            return nil
+        }
     }
     #endif
     
     private let client = OpenAICompatibleClient()
     
-    /// Translates English text to Spanish using ML Kit On-Device Translation with API fallback
+    // Private initializer to enforce singleton pattern
+    private init() {}
+    
+    /// Translates text from source language to target language
     /// 
-    /// This uses Google ML Kit for on-device translation, which is free,
+    /// This uses Google ML Kit for on-device translation when available, which is free,
     /// works offline, and doesn't require API keys or external dependencies.
-    /// Falls back to LLM API if ML Kit is not available.
-    func translateToSpanish(text: String) async throws -> String {
+    /// Falls back to LLM API if ML Kit is not available or doesn't support the language pair.
+    func translate(text: String, from sourceCode: String, to targetCode: String) async throws -> String {
+        let sourceName = LanguageHelper.languageName(for: sourceCode)
+        let targetName = LanguageHelper.languageName(for: targetCode)
+        
+        let systemPrompt = "You are a professional translator. Translate the following \(sourceName) text to \(targetName). Only return the \(targetName) translation, nothing else."
+        let userPromptPrefix = "Translate this to \(targetName):"
+        
         return try await translate(
             text: text,
-            sourceLanguage: "English",
-            targetLanguage: "Spanish",
-            mlKitTranslator: translator,
-            systemPrompt: "You are a professional translator. Translate the following English text to Spanish. Only return the Spanish translation, nothing else.",
-            userPromptPrefix: "Translate this to Spanish:"
+            sourceLanguageCode: sourceCode,
+            targetLanguageCode: targetCode,
+            sourceLanguageName: sourceName,
+            targetLanguageName: targetName,
+            systemPrompt: systemPrompt,
+            userPromptPrefix: userPromptPrefix
         )
     }
     
-    /// Translates Spanish text to English using ML Kit On-Device Translation with API fallback
-    /// 
-    /// This uses Google ML Kit for on-device translation, which is free,
-    /// works offline, and doesn't require API keys or external dependencies.
-    /// Falls back to LLM API if ML Kit is not available.
+    /// Legacy method: Translates English text to Spanish (for backward compatibility)
+    @available(*, deprecated, message: "Use translate(text:from:to:) instead")
+    func translateToSpanish(text: String) async throws -> String {
+        return try await translate(text: text, from: "en", to: "es")
+    }
+    
+    /// Legacy method: Translates Spanish text to English (for backward compatibility)
+    @available(*, deprecated, message: "Use translate(text:from:to:) instead")
     func translateToEnglish(text: String) async throws -> String {
-        return try await translate(
-            text: text,
-            sourceLanguage: "Spanish",
-            targetLanguage: "English",
-            mlKitTranslator: translatorSpanishToEnglish,
-            systemPrompt: "You are a professional translator. Translate the following Spanish text to English. Only return the English translation, nothing else.",
-            userPromptPrefix: "Translate this to English:"
-        )
+        return try await translate(text: text, from: "es", to: "en")
     }
     
     // MARK: - Common Translation Logic (DRY principle)
@@ -66,9 +138,10 @@ struct TranslationService {
     /// Common translation method that handles both ML Kit and LLM API fallback
     private func translate(
         text: String,
-        sourceLanguage: String,
-        targetLanguage: String,
-        mlKitTranslator: Translator?,
+        sourceLanguageCode: String,
+        targetLanguageCode: String,
+        sourceLanguageName: String,
+        targetLanguageName: String,
         systemPrompt: String,
         userPromptPrefix: String
     ) async throws -> String {
@@ -77,13 +150,13 @@ struct TranslationService {
             return ""
         }
         
-        Logger.debug("Starting \(sourceLanguage)→\(targetLanguage) translation, text length: \(text.count)", category: "TranslationService")
+        Logger.debug("Starting \(sourceLanguageName)→\(targetLanguageName) translation, text length: \(text.count)", category: "TranslationService")
         
         #if canImport(MLKitTranslate)
         // Try ML Kit first (on-device, offline)
-        if let translator = mlKitTranslator {
+        if let translator = getTranslator(sourceCode: sourceLanguageCode, targetCode: targetLanguageCode) {
             do {
-                let translated = try await translateWithMLKit(text: text, translator: translator, direction: "\(sourceLanguage)→\(targetLanguage)")
+                let translated = try await translateWithMLKit(text: text, translator: translator, direction: "\(sourceLanguageName)→\(targetLanguageName)")
                 if !translated.isEmpty {
                     return translated
                 }
@@ -91,6 +164,8 @@ struct TranslationService {
             } catch {
                 Logger.warning("ML Kit translation failed: \(error.localizedDescription), falling back to LLM API", category: "TranslationService")
             }
+        } else {
+            Logger.debug("ML Kit translator not available for \(sourceLanguageCode)→\(targetLanguageCode), using LLM API", category: "TranslationService")
         }
         #endif
         
