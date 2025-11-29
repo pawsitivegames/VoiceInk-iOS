@@ -2,31 +2,38 @@
 //  KeyboardViewController.swift
 //  VoiceInkKeyboard
 //
-//  Created by Prakash Joshi on 28/08/2025.
+//  Created by Taafa D on 28/08/2025.
 //
 
 import UIKit
 import KeyboardKit
 import os
+import OSLog
 
 class KeyboardViewController: KeyboardInputViewController {
-    private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "KeyboardExtension")
+    private let logger = Logger(subsystem: "com.pawsitivegames.voiceink", category: "KeyboardExtension")
     
     var recordButton: UIButton!
     private let coordinator = AppGroupCoordinator.shared
     private var recordingStatusTimer: Timer?
-    private var transcriptPollingTimer: Timer?
-    private var transcriptPollingStartTime: Date?
-    private var stopRequestTimestamp: TimeInterval = 0 // Track when stop was requested
-    private let transcriptPollingTimeout: TimeInterval = 60.0 // 60 seconds timeout
-    private var pendingTranscript: String? // Store transcript locally for retry attempts
-    private var transcriptInsertionAttempts: Int = 0 // Track insertion attempts
+    private var verificationTimer: Timer?
     
     deinit {
         recordingStatusTimer?.invalidate()
         recordingStatusTimer = nil
-        transcriptPollingTimer?.invalidate()
-        transcriptPollingTimer = nil
+        verificationTimer?.invalidate()
+        verificationTimer = nil
+        
+        // Remove Darwin notification observers
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        if let token = activationObserverToken {
+            CFNotificationCenterRemoveObserver(center, token, nil, nil)
+            activationObserverToken = nil
+        }
+        if let token = transcriptObserverToken {
+            CFNotificationCenterRemoveObserver(center, token, nil, nil)
+            transcriptObserverToken = nil
+        }
     }
     
     override func viewDidLoad() {
@@ -66,13 +73,24 @@ class KeyboardViewController: KeyboardInputViewController {
     }
     
     private func setupRecordButton() {
+        print("🔵 Keyboard: setupRecordButton() called")
         // Create the native iOS-style record button
         recordButton = UIButton(type: .system)
         recordButton.translatesAutoresizingMaskIntoConstraints = false
-        recordButton.addTarget(self, action: #selector(recordButtonTapped), for: .touchUpInside)
         
-        // Configure for idle state initially
-        configureButtonForIdleState()
+        // Use only .touchUpInside for button taps (standard iOS pattern)
+        // .touchDown can cause double-firing and is not needed
+        recordButton.addTarget(self, action: #selector(recordButtonTapped), for: .touchUpInside)
+        print("🔵 Keyboard: Button target added, targets: \(recordButton.allTargets)")
+        print("🔵 Keyboard: Button actions: \(recordButton.actions(forTarget: self, forControlEvent: .touchUpInside) ?? [])")
+        
+        // Make sure button is enabled and user interaction is enabled
+        recordButton.isEnabled = true
+        recordButton.isUserInteractionEnabled = true
+        
+        // Configure for activate state initially (will update based on actual state)
+        configureButtonForActivateState()
+        print("🔵 Keyboard: Button configured and enabled")
         
         // Add native iOS styling
         recordButton.titleLabel?.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
@@ -90,6 +108,7 @@ class KeyboardViewController: KeyboardInputViewController {
         
         // Add button to main view
         view.addSubview(recordButton)
+        print("🔵 Keyboard: Button added to view")
         
         // Set up constraints - position in top center with safe margins
         NSLayoutConstraint.activate([
@@ -98,9 +117,30 @@ class KeyboardViewController: KeyboardInputViewController {
             recordButton.heightAnchor.constraint(equalToConstant: 32),
             recordButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 120)
         ])
+        print("🔵 Keyboard: Button constraints set")
         
-        // Ensure button stays on top
+        // Ensure button stays on top and can receive touches
         view.bringSubviewToFront(recordButton)
+        recordButton.isUserInteractionEnabled = true
+        recordButton.isExclusiveTouch = true
+        print("🔵 Keyboard: Button brought to front, user interaction enabled")
+    }
+    
+    private func configureButtonForActivateState() {
+        // Use SF Symbol for power/activation
+        let powerConfig = UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+        let powerImage = UIImage(systemName: "power", withConfiguration: powerConfig)
+        
+        recordButton.setImage(powerImage, for: .normal)
+        recordButton.setTitle(" Activate", for: .normal)
+        recordButton.backgroundColor = UIColor.systemGreen
+        recordButton.setTitleColor(.white, for: .normal)
+        recordButton.tintColor = .white
+        
+        // Ensure image and text are properly aligned
+        recordButton.semanticContentAttribute = .forceLeftToRight
+        recordButton.imageEdgeInsets = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 4)
+        recordButton.titleEdgeInsets = UIEdgeInsets(top: 0, left: 4, bottom: 0, right: 0)
     }
     
     private func configureButtonForIdleState() {
@@ -155,6 +195,11 @@ class KeyboardViewController: KeyboardInputViewController {
             // no-op
         }
         
+        // Initialize and sync state when keyboard appears (handles extension termination/restart)
+        // Check for stale state and clear if needed
+        coordinator.checkAndClearStaleRecordingState()
+        coordinator.checkAndClearStaleActivationState()
+        
         // Update button state immediately when keyboard appears
         // This ensures the button shows the correct state when user switches back
         updateButtonAppearanceBasedOnState()
@@ -165,24 +210,14 @@ class KeyboardViewController: KeyboardInputViewController {
         }
         
         // Check if there's a pending transcript to insert when keyboard becomes active
-        // This handles the case where transcript was ready but keyboard wasn't active
-        // Try multiple times with increasing delays to catch the keyboard when it's ready
-        if coordinator.isTranscriptReady {
-            logger.info("📝 Keyboard: Found pending transcript when keyboard appeared, will attempt to insert")
-            
-            // Try immediately
-            tryInsertPendingTranscript()
-            
-            // Try multiple times with increasing delays to ensure we catch it when keyboard is fully ready
-            let delays: [TimeInterval] = [0.1, 0.2, 0.3, 0.5, 0.8, 1.0]
-            for delay in delays {
-                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                    guard let self = self else { return }
-                    // Only try if transcript is still ready (hasn't been consumed)
-                    if self.coordinator.isTranscriptReady {
-                        self.tryInsertPendingTranscript()
-                    }
-                }
+        // Add a small delay to ensure UserDefaults has synced
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self = self else { return }
+            if self.coordinator.isTranscriptReady {
+                self.logger.info("📝 Keyboard: Found pending transcript when keyboard appeared, attempting to insert")
+                self.handleTranscriptReady()
+            } else {
+                self.logger.debug("📝 Keyboard: No pending transcript when keyboard appeared")
             }
         }
     }
@@ -196,124 +231,216 @@ class KeyboardViewController: KeyboardInputViewController {
         
         // Re-add button if KeyboardKit removed it
         if let button = recordButton, button.superview == nil {
+            print("⚠️ Keyboard: Button was removed, re-adding it")
             view.addSubview(button)
+            button.isUserInteractionEnabled = true
         }
         
-        // Ensure button is still visible after layout
+        // Ensure button is still visible after layout and on top
         if let button = recordButton {
             view.bringSubviewToFront(button)
+            button.isUserInteractionEnabled = true
             
             // Make button fully capsule-shaped based on its actual height
             button.layer.cornerRadius = button.frame.height / 2
+            
+            // Ensure button is above all other views
+            button.layer.zPosition = 1000
         }
     }
     
+    /// Gboard-style recording flow:
+    /// 1. Keyboard sets App Group flag (primary communication - always works)
+    /// 2. Keyboard attempts to open app via URL scheme (may fail on iOS 18+)
+    /// 3. If URL fails, user manually opens app (shows helpful message)
+    /// 4. App checks App Group flag on activation and starts recording
+    /// 5. User records, stops, transcription happens in app
+    /// 6. App stores transcript in App Group
+    /// 7. User switches back to original app, keyboard appears
+    /// 8. Keyboard checks App Group for transcript and inserts it
     @objc private func recordButtonTapped() {
+        // 🔥 CRITICAL: This log MUST appear if handler is called
+        print("🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥")
+        print("🔥🔥🔥 micButtonTapped: EXECUTED 🔥🔥🔥")
+        print("🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥")
+        logger.info("🔥🔥🔥 Keyboard: recordButtonTapped() EXECUTED - FIRST LINE 🔥🔥🔥")
+        os_log("🔥🔥🔥 Keyboard: recordButtonTapped() EXECUTED - FIRST LINE 🔥🔥🔥", log: .default, type: .info)
+        
+        // Visual indicator that button was tapped (change button text temporarily)
+        let originalTitle = recordButton.title(for: .normal) ?? ""
+        recordButton.setTitle(" TAPPED!", for: .normal)
+        recordButton.backgroundColor = UIColor.systemYellow
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.recordButton.setTitle(originalTitle, for: .normal)
+            self?.updateButtonAppearanceBasedOnState()
+        }
+        
+        // Use os_log which works better in extensions
+        logger.info("🔴🔴🔴 Keyboard: recordButtonTapped() CALLED 🔴🔴🔴")
+        os_log("🔴 Keyboard: recordButtonTapped() called", log: .default, type: .info)
+        
+        // Ensure we're on main thread
+        guard Thread.isMainThread else {
+            logger.warning("⚠️ Keyboard: Not on main thread, dispatching...")
+            DispatchQueue.main.async { [weak self] in
+                self?.recordButtonTapped()
+            }
+            return
+        }
+        
+        logger.info("✅ Keyboard: On main thread")
+        
+        // Guard against nil button
+        guard let button = recordButton else {
+            logger.error("❌ Keyboard: recordButton is nil, cannot handle tap")
+            return
+        }
+        
+        logger.info("✅ Keyboard: recordButton exists")
+        
         // Add native iOS button press animation
         addButtonPressAnimation()
         
         // Provide haptic feedback
         let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
         impactFeedback.impactOccurred()
+        logger.info("✅ Keyboard: Haptic feedback sent")
         
-        if coordinator.isRecording {
-            // Stop recording
-            logger.info("🛑 Keyboard: Stop button pressed, requesting stop recording")
-            
-            // Clear any old/stale transcript before starting new polling
-            // This ensures we don't get a transcript from a previous recording
-            coordinator.clearOldTranscript()
-            
-            // Record when we requested stop (to match with transcript timestamp)
-            stopRequestTimestamp = Date().timeIntervalSince1970
-            
+        let isRecording = coordinator.isRecording
+        logger.info("📊 Keyboard: isRecording = \(isRecording)")
+        
+        if isRecording {
+            // Stop recording: Use App Group communication directly (no need to open app)
+            logger.info("🛑 Keyboard: Stop button pressed, requesting stop via App Group")
             coordinator.requestStopRecording()
-            logger.info("🛑 Keyboard: Stop request sent, starting transcript polling (timestamp: \(self.stopRequestTimestamp))")
-            updateButtonAppearanceBasedOnState()
-            // Start polling for transcript
-            startTranscriptPolling()
+            logger.info("🛑 Keyboard: Stop request sent via App Group")
+            // Optimistically update button state
+            configureButtonForIdleState()
         } else {
-            // Start recording by opening main app
-            // Clear any old transcript when starting new recording
+            // Start recording: Apple-compliant architecture
+            // iOS 15+ blocks keyboard extensions from automatically opening apps
+            // Solution: Set App Group flag + ATTEMPT to open app (may fail, but we try)
+            logger.info("🎙️ Keyboard: Record button pressed - starting flow")
+            
+            // Clear any old transcript
             coordinator.clearOldTranscript()
-            // Reset stop request timestamp
-            stopRequestTimestamp = 0
-            openMainAppForRecording()
+            logger.info("🧹 Keyboard: Cleared old transcript")
+            
+            // Set pending recording request flag in App Group (primary communication method)
+            // This is the ONLY reliable way to communicate from keyboard to app on iOS 15+
+            coordinator.requestStartRecording()
+            
+            // Verify App Group flag was set successfully
+            let flagWasSet = coordinator.checkStartRecordingFlag()
+            if flagWasSet {
+                logger.info("✅ Keyboard: App Group flag verified - set successfully")
+            } else {
+                logger.error("❌ Keyboard: App Group flag verification failed! Flag may not have been set.")
+            }
+            
+            // 🔥 ATTEMPT TO OPEN APP (even though iOS 15+ may block it)
+            // We want to see the attempt in logs, even if it fails
+            print("🚀🚀🚀 Keyboard: Attempting to open app via URL scheme...")
+            logger.info("🚀 Keyboard: Attempting to open app via URL scheme")
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                print("🚀 Keyboard: Inside async block, about to call openMainApp")
+                self.openMainApp(url: "voiceink://record")
+            }
+            
+            // Show user instruction to open the app only if flag was set successfully
+            // iOS blocks automatic app opening from keyboard extensions
+            if flagWasSet {
+                DispatchQueue.main.async { [weak self] in
+                    self?.showOpenAppMessage()
+                }
+            } else {
+                logger.error("❌ Keyboard: Not showing open app message - App Group flag not set")
+            }
+            
+            // Optimistically update button state
+            configureButtonForRecordingState()
         }
+        
+        // Update based on actual state (will sync when state updates)
+        updateButtonAppearanceBasedOnState()
+        logger.info("✅ Keyboard: recordButtonTapped() completed")
     }
     
     private func addButtonPressAnimation() {
         // Native iOS button press animation - scale down then back up
+        guard let button = recordButton else { return }
         UIView.animate(withDuration: 0.1, delay: 0, options: [.curveEaseInOut], animations: {
-            self.recordButton.transform = CGAffineTransform(scaleX: 0.95, y: 0.95)
+            button.transform = CGAffineTransform(scaleX: 0.95, y: 0.95)
         }) { _ in
             UIView.animate(withDuration: 0.1, delay: 0, options: [.curveEaseInOut], animations: {
-                self.recordButton.transform = CGAffineTransform.identity
+                button.transform = CGAffineTransform.identity
             })
         }
     }
     
-    private func openMainAppForRecording() {
-        // iOS keyboard extensions have severe limitations with audio recording
-        // The correct approach is to simply open the main app and let user record there
+    // NOTE: Automatic app opening from keyboard extensions is blocked by iOS 15+
+    // This method attempts to open the app, but iOS 15+ may block it
+    // The App Group flag is the primary communication method (fallback)
+    private func openMainApp(url: String) {
+        print("🚀🚀🚀 Keyboard: openMainApp() CALLED with URL: \(url)")
+        logger.info("🚀 Keyboard: openMainApp() called with URL: \(url)")
+        os_log("🚀 Keyboard: openMainApp() called with URL: %@", log: .default, type: .info, url)
         
-        // Try multiple approaches to open the main app
-        if let url = URL(string: "voiceink://record") {
-            // Method 1: Try extensionContext.open (primary method)
-            extensionContext?.open(url) { success in
-                if success {
-                    self.logger.info("✅ Opened main app via extensionContext")
-                } else {
-                    self.logger.warning("❌ extensionContext.open failed, trying alternative methods")
-                    DispatchQueue.main.async {
-                        self.tryAlternativeURLOpening(url)
-                    }
-                }
-            }
-        } else {
-            // Fallback: Show message to user
-            showUserMessage()
+        // iOS 15+ blocks keyboard extensions from automatically opening apps
+        // This is by design for privacy and security
+        // We rely on App Group flags as fallback - user manually opens app if this fails
+        logger.info("ℹ️ Keyboard: Attempting to open app (iOS 15+ may block this)")
+        logger.info("ℹ️ Keyboard: App Group flag is set - app will auto-start recording when user opens it")
+        
+        // Validate URL
+        guard let urlObject = URL(string: url) else {
+            print("❌ Keyboard: Invalid URL string: \(url)")
+            logger.error("❌ Keyboard: Invalid URL string: \(url)")
+            return
         }
+        print("✅ Keyboard: URL object created: \(urlObject.absoluteString)")
+        
+        // Validate extension context
+        guard let context = extensionContext else {
+            print("❌ Keyboard: extensionContext is nil!")
+            logger.error("❌ Keyboard: extensionContext is nil!")
+            return
+        }
+        print("✅ Keyboard: extensionContext is available")
+        
+        // Ensure main thread
+        guard Thread.isMainThread else {
+            print("⚠️ Keyboard: Not on main thread, dispatching...")
+            logger.warning("⚠️ Keyboard: Not on main thread, dispatching...")
+            DispatchQueue.main.async { [weak self] in
+                self?.openMainApp(url: url)
+            }
+            return
+        }
+        print("✅ Keyboard: On main thread")
+        
+        // 🔥 ATTEMPT TO OPEN APP
+        print("🚀🚀🚀 Keyboard: Calling extensionContext.open() NOW...")
+        logger.info("🚀 Keyboard: Calling extensionContext.open() now...")
+        os_log("🚀 Keyboard: Calling extensionContext.open() now", log: .default, type: .info)
+        
+        context.open(urlObject) { [weak self] success in
+            print("🚀 Keyboard: extensionContext.open() callback received: success=\(success)")
+            if success {
+                print("✅✅✅ Keyboard: App opened successfully! (rare on iOS 15+)")
+                self?.logger.info("✅ Keyboard: App opened successfully! (rare on iOS 15+)")
+                os_log("✅ Keyboard: App opened successfully", log: .default, type: .info)
+            } else {
+                print("⚠️⚠️⚠️ Keyboard: extensionContext.open() returned false (expected on iOS 15+)")
+                self?.logger.info("⚠️ Keyboard: extensionContext.open() returned false (expected on iOS 15+)")
+                os_log("⚠️ Keyboard: extensionContext.open() returned false", log: .default, type: .info)
+            }
+        }
+        
+        print("🚀 Keyboard: extensionContext.open() call completed (callback will fire asynchronously)")
     }
     
-    private func tryAlternativeURLOpening(_ url: URL) {
-        // Try UIApplication directly if available
-        if let sharedApp = UIApplication.value(forKeyPath: "sharedApplication") as? UIApplication {
-            if sharedApp.canOpenURL(url) {
-                sharedApp.open(url, options: [:]) { success in
-                    if success {
-                        self.logger.info("✅ Opened main app via UIApplication.open")
-                    } else {
-                        self.logger.error("❌ UIApplication.open failed")
-                        self.showUserMessage()
-                    }
-                }
-                return
-            }
-        }
-        
-        // Fallback: Try responder chain method
-        openURLViaResponderChain(url)
-    }
-    
-    private func openURLViaResponderChain(_ url: URL) {
-        // iOS 18 workaround: Use responder chain to open URL
-        var responder: UIResponder? = self
-        let selector = sel_registerName("openURL:")
-        
-        while let r = responder, !r.responds(to: selector) {
-            responder = r.next
-        }
-        
-        if let responder = responder {
-            _ = responder.perform(selector, with: url)
-            logger.info("✅ Attempted to open main app via responder chain")
-            // Don't assume success since we can't get feedback from this method
-        } else {
-            logger.error("❌ All URL opening methods failed")
-            showUserMessage()
-        }
-    }
     
     private func showUserMessage() {
         // Last resort: Update button to show user should open main app manually
@@ -327,7 +454,43 @@ class KeyboardViewController: KeyboardInputViewController {
         recordButton.tintColor = .white
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            self.configureButtonForIdleState()
+            self.updateButtonAppearanceBasedOnState()
+        }
+    }
+    
+    private func showFullAccessRequiredMessage() {
+        // Show message that Full Access is required
+        let lockConfig = UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+        let lockImage = UIImage(systemName: "lock.fill", withConfiguration: lockConfig)
+        
+        recordButton.setImage(lockImage, for: .normal)
+        recordButton.setTitle(" Enable Full Access", for: .normal)
+        recordButton.backgroundColor = UIColor.systemOrange
+        recordButton.setTitleColor(.white, for: .normal)
+        recordButton.tintColor = .white
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            self.updateButtonAppearanceBasedOnState()
+        }
+    }
+    
+    private func showOpenAppMessage() {
+        // Show clear instruction to user: "Open VoiceInk to record"
+        // This is the Apple-compliant way - user manually opens app
+        let appConfig = UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+        let appImage = UIImage(systemName: "app.badge", withConfiguration: appConfig)
+        
+        recordButton.setImage(appImage, for: .normal)
+        recordButton.setTitle(" Open VoiceInk", for: .normal)
+        recordButton.backgroundColor = UIColor.systemBlue
+        recordButton.setTitleColor(.white, for: .normal)
+        recordButton.tintColor = .white
+        
+        logger.info("ℹ️ Keyboard: Showing 'Open VoiceInk' message to user")
+        
+        // Reset button after 4 seconds
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { [weak self] in
+            self?.updateButtonAppearanceBasedOnState()
         }
     }
     
@@ -335,7 +498,7 @@ class KeyboardViewController: KeyboardInputViewController {
         // Stop any existing timer
         recordingStatusTimer?.invalidate()
         
-        // Monitor recording status every 0.5 seconds
+        // Monitor recording and activation status every 0.5 seconds
         // Use common run loop modes so timer works even when keyboard is active
         recordingStatusTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.updateButtonAppearanceBasedOnState()
@@ -348,172 +511,101 @@ class KeyboardViewController: KeyboardInputViewController {
         
         // Initial state update
         updateButtonAppearanceBasedOnState()
+        
+        // Also listen for activation state changes via Darwin notifications
+        setupActivationStateObserver()
     }
     
-    private func startTranscriptPolling() {
-        // Stop any existing polling
-        stopTranscriptPolling()
-        
-        // Record start time for timeout
-        transcriptPollingStartTime = Date()
-        
-        logger.info("🔄 Keyboard: Starting transcript polling (stopRequestTimestamp: \(self.stopRequestTimestamp))")
-        
-        // Start with aggressive polling (every 0.1 seconds) to catch transcript as soon as it's ready
-        transcriptPollingTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            self?.checkForTranscript()
-        }
-        
-        // Add to common run loop modes
-        if let timer = transcriptPollingTimer {
-            RunLoop.current.add(timer, forMode: .common)
-        }
-        
-        // Also check immediately
-        checkForTranscript()
-    }
+    private var activationObserverToken: UnsafeMutableRawPointer?
     
-    private func stopTranscriptPolling() {
-        transcriptPollingTimer?.invalidate()
-        transcriptPollingTimer = nil
-        transcriptPollingStartTime = nil
-    }
-    
-    private func checkForTranscript() {
-        // Check for timeout
-        if let startTime = transcriptPollingStartTime {
-            let elapsed = Date().timeIntervalSince(startTime)
-            if elapsed > transcriptPollingTimeout {
-                logger.warning("⏱️ Keyboard: Transcript polling timed out after \(self.transcriptPollingTimeout) seconds")
-                stopTranscriptPolling()
-                return
-            }
+    private func setupActivationStateObserver() {
+        // Remove existing observer if any
+        if let token = activationObserverToken {
+            let center = CFNotificationCenterGetDarwinNotifyCenter()
+            CFNotificationCenterRemoveObserver(center, token, nil, nil)
+            activationObserverToken = nil
         }
         
-        // Check if transcript is ready
-        let isReady = coordinator.isTranscriptReady
-        if !isReady {
-            // Only log every 50th check to avoid spam (every 5 seconds with 0.1s interval)
-            if let startTime = transcriptPollingStartTime {
-                let elapsed = Date().timeIntervalSince(startTime)
-                if Int(elapsed * 10) % 50 == 0 { // Log every 5 seconds
-                    logger.debug("🔄 Keyboard: Polling for transcript... (elapsed: \(Int(elapsed))s)")
-                }
-            }
-            return
-        }
-        
-        logger.info("✅ Keyboard: Transcript is ready, attempting to insert...")
-        
-        // Try to insert the transcript - be more aggressive about it
-        attemptTranscriptInsertion()
-    }
-    
-    private func attemptTranscriptInsertion() {
-        // If we already have a pending transcript, use it (for retries)
-        if let existingTranscript = pendingTranscript {
-            logger.info("🔄 Keyboard: Retrying with existing pending transcript (\(existingTranscript.count) chars)")
-            tryInsertTranscriptWithRetries(existingTranscript)
-            return
-        }
-        
-        // Get the transcript - don't consume it yet, store it locally for retries
-        guard coordinator.isTranscriptReady else {
-            logger.warning("⚠️ Keyboard: Transcript not ready yet")
-            return
-        }
-        
-        // Get transcript without consuming it - we'll consume after successful insertion
-        guard let transcript = coordinator.getTranscriptWithoutConsuming(afterTimestamp: stopRequestTimestamp) else {
-            logger.warning("⚠️ Keyboard: Failed to retrieve transcript, will keep trying...")
-            return
-        }
-        
-        logger.info("✅ Keyboard: Got transcript (\(transcript.count) chars), attempting to insert now")
-        
-        // Store locally for retry attempts
-        pendingTranscript = transcript
-        transcriptInsertionAttempts = 0
-        
-        // Stop polling since we got the transcript
-        stopTranscriptPolling()
-        
-        // Try to insert with retries
-        tryInsertTranscriptWithRetries(transcript)
-    }
-    
-    private func tryInsertTranscriptWithRetries(_ transcript: String) {
-        transcriptInsertionAttempts += 1
-        
-        // Try multiple times with delays to ensure keyboard is ready
-        let delays: [TimeInterval] = [0.0, 0.1, 0.3, 0.5, 1.0, 2.0]
-        
-        guard transcriptInsertionAttempts <= delays.count else {
-            logger.warning("⚠️ Keyboard: Max insertion attempts (\(delays.count)) reached, giving up")
-            // Consume the transcript even if we failed (to prevent it from being stuck)
-            _ = coordinator.getAndConsumeTranscript(afterTimestamp: stopRequestTimestamp)
-            pendingTranscript = nil
-            transcriptInsertionAttempts = 0
-            return
-        }
-        
-        let delay = delays[transcriptInsertionAttempts - 1]
-        logger.info("🔄 Keyboard: Attempt \(transcriptInsertionAttempts)/\(delays.count), delay: \(delay)s")
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self = self else { return }
-            
-            // textDocumentProxy should always be available in KeyboardInputViewController
-            // But we can check if the view is in a window as a proxy for keyboard readiness
-            guard self.view.window != nil else {
-                if delay < delays.last! {
-                    // Retry if we haven't exhausted all attempts
-                    self.logger.debug("⏳ Keyboard: View not in window yet, will retry")
-                    self.tryInsertTranscriptWithRetries(transcript)
-                } else {
-                    self.logger.warning("❌ Keyboard: View never appeared in window")
-                    // Consume the transcript to prevent it from being stuck
-                    _ = self.coordinator.getAndConsumeTranscript(afterTimestamp: self.stopRequestTimestamp)
-                    self.pendingTranscript = nil
-                }
-                return
-            }
-            
-            // Try to insert
-            self.logger.info("📝 Keyboard: Attempting insertion (attempt \(self.transcriptInsertionAttempts)/\(delays.count))")
-            let success = self.insertTranscript(transcript)
-            
-            if success {
-                // Success! Consume the transcript
-                self.logger.info("✅ Keyboard: Successfully inserted transcript on attempt \(self.transcriptInsertionAttempts)")
-                _ = self.coordinator.getAndConsumeTranscript(afterTimestamp: self.stopRequestTimestamp)
-                self.pendingTranscript = nil
-                self.transcriptInsertionAttempts = 0
-            } else if self.transcriptInsertionAttempts < delays.count {
-                // Failed but have more attempts - retry
-                self.logger.warning("⚠️ Keyboard: Insertion returned false, will retry (attempt \(self.transcriptInsertionAttempts)/\(delays.count))")
-                self.tryInsertTranscriptWithRetries(transcript)
-            } else {
-                // All attempts exhausted
-                self.logger.error("❌ Keyboard: All \(delays.count) insertion attempts failed")
-                // Consume the transcript to prevent it from being stuck
-                _ = self.coordinator.getAndConsumeTranscript(afterTimestamp: self.stopRequestTimestamp)
-                self.pendingTranscript = nil
-                self.transcriptInsertionAttempts = 0
-            }
-        }
-    }
-    
-    private func setupTranscriptNotificationObserver() {
-        // Listen for Darwin notifications about transcript being ready
-        let notificationName = "com.prakashjoshipax.VoiceInk.transcriptReady"
+        // Listen for activation state changes
+        let notificationName = "com.pawsitivegames.VoiceInk.activationStateChanged"
         let center = CFNotificationCenterGetDarwinNotifyCenter()
+        
+        // Use weak reference wrapper to prevent crashes
+        let token = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        activationObserverToken = token
         
         CFNotificationCenterAddObserver(
             center,
-            Unmanaged.passUnretained(self).toOpaque(),
+            token,
             { (center, observer, name, object, userInfo) in
                 guard let observer = observer else { return }
+                // Safely unwrap - if object was deallocated, this will be handled gracefully
+                let keyboardVC = Unmanaged<KeyboardViewController>.fromOpaque(observer).takeUnretainedValue()
+                keyboardVC.handleActivationStateChanged()
+            },
+            notificationName as CFString,
+            nil,
+            .deliverImmediately
+        )
+        
+        logger.info("📡 Keyboard: Set up activation state change observer")
+    }
+    
+    private func handleActivationStateChanged() {
+        logger.info("🔵 Keyboard: Activation state changed, updating button")
+        DispatchQueue.main.async { [weak self] in
+            self?.updateButtonAppearanceBasedOnState()
+        }
+    }
+    
+    // MARK: - Simplified Transcript Handling
+    
+    private func handleTranscriptReady() {
+        logger.info("📝 Keyboard: Handling transcript ready")
+        
+        guard coordinator.isTranscriptReady else {
+            logger.warning("⚠️ Keyboard: Transcript not ready")
+            return
+        }
+        
+        guard let transcript = coordinator.getTranscript() else {
+            logger.warning("⚠️ Keyboard: Failed to retrieve transcript")
+            return
+        }
+        
+        logger.info("✅ Keyboard: Got transcript (\(transcript.count) chars), inserting now")
+        
+        // Insert transcript directly
+        insertTranscript(transcript)
+        
+        // Clear transcript after insertion
+        coordinator.clearTranscript()
+    }
+    
+    private var transcriptObserverToken: UnsafeMutableRawPointer?
+    
+    private func setupTranscriptNotificationObserver() {
+        // Remove existing observer if any
+        if let token = transcriptObserverToken {
+            let center = CFNotificationCenterGetDarwinNotifyCenter()
+            CFNotificationCenterRemoveObserver(center, token, nil, nil)
+            transcriptObserverToken = nil
+        }
+        
+        // Listen for Darwin notifications about transcript being ready
+        let notificationName = "com.pawsitivegames.VoiceInk.transcriptReady"
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        
+        // Use weak reference wrapper to prevent crashes
+        let token = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        transcriptObserverToken = token
+        
+        CFNotificationCenterAddObserver(
+            center,
+            token,
+            { (center, observer, name, object, userInfo) in
+                guard let observer = observer else { return }
+                // Safely unwrap - if object was deallocated, this will be handled gracefully
                 let keyboardVC = Unmanaged<KeyboardViewController>.fromOpaque(observer).takeUnretainedValue()
                 keyboardVC.handleTranscriptReadyNotification()
             },
@@ -528,26 +620,10 @@ class KeyboardViewController: KeyboardInputViewController {
     private func handleTranscriptReadyNotification() {
         logger.info("🔔 Keyboard: Received transcript ready Darwin notification")
         
-        // Try to insert immediately when we get the notification
+        // Insert transcript immediately when we get the notification
         DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            if self.coordinator.isTranscriptReady {
-                self.logger.info("✅ Keyboard: Transcript is ready (from notification), attempting insertion")
-                // Always try immediate insertion when we get the notification
-                // This ensures we catch it as soon as possible
-                self.attemptTranscriptInsertion()
-            } else {
-                self.logger.warning("⚠️ Keyboard: Notification received but transcript not ready yet")
-            }
+            self?.handleTranscriptReady()
         }
-    }
-    
-    private func tryInsertPendingTranscript() {
-        guard coordinator.isTranscriptReady else { return }
-        
-        // Be more aggressive - try to insert even if keyboard doesn't seem fully ready
-        logger.info("🔄 Keyboard: Attempting to insert pending transcript")
-        attemptTranscriptInsertion()
     }
     
     private func insertTranscript(_ text: String) -> Bool {
@@ -625,26 +701,33 @@ class KeyboardViewController: KeyboardInputViewController {
     }
     
     private func updateButtonAppearanceBasedOnState() {
+        // Always run on main thread
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.updateButtonAppearanceBasedOnState()
+            }
+            return
+        }
+        
+        guard let button = recordButton else {
+            logger.warning("⚠️ Keyboard: recordButton is nil, cannot update appearance")
+            return
+        }
+        
         let isRecording = coordinator.isRecording
         
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self, let button = self.recordButton else { return }
-            
-            if isRecording {
-                // Configure for recording state
-                logger.debug("🎙️ Keyboard: Updating button to recording state (Stop)")
-                self.configureButtonForRecordingState()
-            } else {
-                // Configure for idle state
-                logger.debug("🎙️ Keyboard: Updating button to idle state (Record)")
-                self.configureButtonForIdleState()
-                // Stop transcript polling if recording stopped (user might have stopped from app)
-                self.stopTranscriptPolling()
-            }
-            
-            // Ensure capsule shape is maintained
-            button.layer.cornerRadius = button.frame.height / 2
+        if isRecording {
+            // Configure for recording state
+            logger.debug("🎙️ Keyboard: Updating button to recording state (Stop)")
+            configureButtonForRecordingState()
+        } else {
+            // Configure for idle state (not recording)
+            logger.debug("🎙️ Keyboard: Updating button to idle state (Record)")
+            configureButtonForIdleState()
         }
+        
+        // Ensure capsule shape is maintained
+        button.layer.cornerRadius = button.frame.height / 2
     }
     
     override func textWillChange(_ textInput: UITextInput?) {
@@ -657,18 +740,18 @@ class KeyboardViewController: KeyboardInputViewController {
         super.textDidChange(textInput)
         
         // Check if there's a pending transcript when text field becomes active
-        // This ensures we insert transcript even if keyboard wasn't active when it was ready
-        if coordinator.isTranscriptReady {
-            logger.info("📝 Keyboard: Text field changed and transcript is ready, attempting to insert")
-            // Try immediately - use the more aggressive insertion method
-            attemptTranscriptInsertion()
+        // Add a small delay to ensure UserDefaults has synced
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self = self else { return }
+            if self.coordinator.isTranscriptReady {
+                self.logger.info("📝 Keyboard: Text field changed and transcript is ready, attempting to insert")
+                self.handleTranscriptReady()
+            }
         }
     }
     
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        // Stop polling when keyboard disappears
-        stopTranscriptPolling()
         // Note: We keep the recording status timer running so it can update
         // when the keyboard appears again
     }

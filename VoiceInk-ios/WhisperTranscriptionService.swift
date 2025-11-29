@@ -30,6 +30,7 @@ enum WhisperTranscriptionError: Error {
 struct WhisperTranscriptionService: TranscriptionService {
     
     /// Transcribe audio file using local Whisper model
+    /// Only supports "en" (English) and "es" (Spanish) languages
     func transcribeAudioFile(
         apiBaseURL: URL,
         apiKey: String,
@@ -38,7 +39,19 @@ struct WhisperTranscriptionService: TranscriptionService {
         language: String? = nil
     ) async throws -> String {
         
-        print("WhisperTranscriptionService: Starting local transcription")
+        // Validate language parameter - only allow "en" or "es"
+        var validatedLanguage: String? = nil
+        if let lang = language {
+            if lang == "en" || lang == "es" {
+                validatedLanguage = lang
+                Logger.debug("Using specified language: \(lang)", category: "WhisperTranscriptionService")
+            } else {
+                Logger.warning("Invalid language '\(lang)', only 'en' and 'es' are supported. Using auto-detection instead.", category: "WhisperTranscriptionService")
+                validatedLanguage = nil
+            }
+        }
+        
+        Logger.debug("Starting local transcription", category: "WhisperTranscriptionService")
         
         // Get available model
         let modelManager = LocalModelManager.shared
@@ -46,7 +59,7 @@ struct WhisperTranscriptionService: TranscriptionService {
             throw WhisperTranscriptionError.noModelAvailable
         }
         
-        print("WhisperTranscriptionService: Using model at \(modelPath)")
+        Logger.debug("Using model at \(modelPath)", category: "WhisperTranscriptionService")
         
         // Load Whisper context
         let context: WhisperContext
@@ -55,38 +68,49 @@ struct WhisperTranscriptionService: TranscriptionService {
             // Note: If you see a warning about Core ML encoder model not found, this is expected.
             // The Core ML encoder is an optional optimization - the library falls back to CPU automatically.
         } catch {
-            print("WhisperTranscriptionService: Failed to load model: \(error)")
+            Logger.error("Failed to load model: \(error.localizedDescription)", category: "WhisperTranscriptionService")
             throw WhisperTranscriptionError.modelLoadFailed
         }
         
         // Process audio file (expecting WAV format from recorder)
+        // PERFORMANCE: Uses async file reading to avoid blocking
         let audioSamples: [Float]
         do {
-            audioSamples = try decodeWaveFile(fileURL)
-            print("WhisperTranscriptionService: Processed \(audioSamples.count) audio samples")
+            audioSamples = try await decodeWaveFile(fileURL)
+            Logger.debug("Processed \(audioSamples.count) audio samples", category: "WhisperTranscriptionService")
         } catch {
-            print("WhisperTranscriptionService: Audio processing failed: \(error)")
+            Logger.error("Audio processing failed: \(error.localizedDescription)", category: "WhisperTranscriptionService")
             // Clean up resources before throwing
             await context.releaseResources()
-            print("WhisperTranscriptionService: Whisper context resources released.")
             throw WhisperTranscriptionError.audioProcessingFailed
         }
         
-        // Perform transcription
-        let success = await context.fullTranscribe(samples: audioSamples)
+        // Perform transcription with language parameter (nil for auto-detection)
+        // Only "en" or "es" are allowed - validatedLanguage is already filtered
+        let success = await context.fullTranscribe(samples: audioSamples, language: validatedLanguage)
         
         if success {
             let transcription = await context.getTranscription()
+            
+            // Get detected language if auto-detection was used
+            // getDetectedLanguage() only returns "en" or "es" (or nil)
+            let detectedLanguage = await context.getDetectedLanguage()
+            if let detected = detectedLanguage {
+                Logger.debug("Detected language: \(detected) (English/Spanish only)", category: "WhisperTranscriptionService")
+            } else if validatedLanguage != nil {
+                Logger.debug("Used specified language: \(validatedLanguage!)", category: "WhisperTranscriptionService")
+            } else {
+                Logger.debug("Language detection unavailable or detected non-English/Spanish language", category: "WhisperTranscriptionService")
+            }
+            
             // Clean up resources
             await context.releaseResources()
-            print("WhisperTranscriptionService: Whisper context resources released.")
-            print("WhisperTranscriptionService: Transcription completed successfully")
+            Logger.info("Transcription completed successfully", category: "WhisperTranscriptionService")
             return transcription.isEmpty ? "No audio detected." : transcription
         } else {
             // Clean up resources before throwing error
             await context.releaseResources()
-            print("WhisperTranscriptionService: Whisper context resources released.")
-            print("WhisperTranscriptionService: Transcription failed")
+            Logger.error("Transcription failed", category: "WhisperTranscriptionService")
             throw WhisperTranscriptionError.transcriptionFailed
         }
     }

@@ -12,6 +12,8 @@ final class Transcription {
     var id: UUID
     var text: String
     var enhancedText: String?
+    var translatedText: String?
+    var detectedLanguage: String? // Language code (e.g., "en", "es") detected from audio
     var timestamp: Date
     var duration: TimeInterval
     var audioFileURL: String?
@@ -22,10 +24,12 @@ final class Transcription {
     var transcriptionStatus: TranscriptionStatus
     var transcriptionError: String?
     
-    init(text: String, duration: TimeInterval, enhancedText: String? = nil, audioFileURL: String? = nil, transcriptionModelName: String? = nil, aiEnhancementModelName: String? = nil, transcriptionDuration: TimeInterval? = nil, enhancementDuration: TimeInterval? = nil, transcriptionStatus: TranscriptionStatus = .pending, transcriptionError: String? = nil) {
+    init(text: String, duration: TimeInterval, enhancedText: String? = nil, translatedText: String? = nil, detectedLanguage: String? = nil, audioFileURL: String? = nil, transcriptionModelName: String? = nil, aiEnhancementModelName: String? = nil, transcriptionDuration: TimeInterval? = nil, enhancementDuration: TimeInterval? = nil, transcriptionStatus: TranscriptionStatus = .pending, transcriptionError: String? = nil) {
         self.id = UUID()
         self.text = text
         self.enhancedText = enhancedText
+        self.translatedText = translatedText
+        self.detectedLanguage = detectedLanguage
         self.timestamp = Date()
         self.duration = duration
         self.audioFileURL = audioFileURL

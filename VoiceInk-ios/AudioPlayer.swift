@@ -15,16 +15,36 @@ final class AudioPlayer: ObservableObject {
     func loadAudio(from path: String) {
         isLoading = true
         
+        // CRITICAL: Clear any previous failed player to prevent "invalid reuse after initialization failure"
+        audioPlayer = nil
+        
         let url = URL(fileURLWithPath: path)
         
         do {
             audioPlayer = try AVAudioPlayer(contentsOf: url)
-            audioPlayer?.prepareToPlay()
-            duration = audioPlayer?.duration ?? 0
+            // Verify player was created successfully
+            guard let player = audioPlayer else {
+                Logger.error("AVAudioPlayer instance is nil after creation", category: "AudioPlayer")
+                isLoading = false
+                return
+            }
+            
+            // Prepare to play - if this fails, the player might be in an invalid state
+            guard player.prepareToPlay() else {
+                Logger.error("Failed to prepare AVAudioPlayer for playback", category: "AudioPlayer")
+                // Clear failed player to prevent reuse
+                audioPlayer = nil
+                isLoading = false
+                return
+            }
+            
+            duration = player.duration
             currentTime = 0
             isLoading = false
         } catch {
-            print("Failed to load audio: \(error)")
+            Logger.error("Failed to load audio: \(error.localizedDescription)", category: "AudioPlayer")
+            // CRITICAL: Clear failed player to prevent "invalid reuse after initialization failure"
+            audioPlayer = nil
             isLoading = false
         }
     }
@@ -40,7 +60,7 @@ final class AudioPlayer: ObservableObject {
             isPlaying = true
             startTimer()
         } catch {
-            print("Failed to play audio: \(error)")
+            Logger.error("Failed to play audio: \(error.localizedDescription)", category: "AudioPlayer")
         }
     }
     
@@ -64,7 +84,8 @@ final class AudioPlayer: ObservableObject {
     }
     
     private func startTimer() {
-        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        // Optimized timer: use RunLoop.main for proper scheduling and ensure cleanup
+        timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self = self, let player = self.audioPlayer else { return }
                 self.currentTime = player.currentTime
@@ -77,6 +98,7 @@ final class AudioPlayer: ObservableObject {
                 }
             }
         }
+        RunLoop.main.add(timer!, forMode: .common)
     }
     
     private func stopTimer() {

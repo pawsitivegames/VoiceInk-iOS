@@ -1,17 +1,17 @@
 import Foundation
-import os
+import os.log
 
 class VADModelManager {
     static let shared = VADModelManager()
-    private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "VADModelManager")
+    private let logger = OSLog(subsystem: "com.pawsitivegames.voiceink", category: "VADModelManager")
     private var modelPath: String?
 
     private init() {
         if let path = Bundle.main.path(forResource: "ggml-silero-v5.1.2", ofType: "bin") {
             self.modelPath = path
-            logger.info("VAD model found at path: \(path)")
+            os_log("VAD model found at path: %{public}@", log: logger, type: .info, path)
         } else {
-            logger.error("VAD model 'ggml-silero-v5.1.2.bin' not found in bundle resources.")
+            os_log("VAD model 'ggml-silero-v5.1.2.bin' not found in bundle resources.", log: logger, type: .error)
         }
     }
 

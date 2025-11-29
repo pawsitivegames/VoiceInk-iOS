@@ -51,7 +51,7 @@ This document outlines the steps to integrate Keyboard Kit into the VoiceInk app
     - ⏳ **NEXT**: Add this file to both the main app target and keyboard extension target in Xcode's "Target Membership" inspector.
     - When the user taps the Record button, the keyboard will:
         1. Set a flag (e.g., `shouldStartRecording = true`) in the shared `UserDefaults`.
-        2. Post a Darwin notification (e.g., `com.prakashjoshipax.VoiceInk.startRecording`) to immediately notify the main app.
+        2. Post a Darwin notification (e.g., `com.pawsitivegames.VoiceInk.startRecording`) to immediately notify the main app.
 
 ## Phase 3: Implementing Recording in the Main App
 

@@ -19,7 +19,7 @@ class DefaultModeManager {
         settings.modes.append(defaultMode)
         settings.selectedModeId = defaultMode.id
         
-        print("✅ Created default mode: \(defaultMode.name)")
+        Logger.info("Created default mode: \(defaultMode.name)", category: "DefaultModeManager")
     }
     
     /// Creates the default mode with local whisper and no post-processing
@@ -41,6 +41,6 @@ class DefaultModeManager {
         ensureDefaultModeExists()
         
         // Additional first-time setup can go here if needed
-        print("🎉 App ready for first-time user with default mode")
+        Logger.info("App ready for first-time user with default mode", category: "DefaultModeManager")
     }
 }

@@ -154,7 +154,6 @@ struct ModelDownloadOnboardingView: View {
                                 .font(.title)
                         } else if modelManager.isDownloading[baseModel.id] == true {
                             ProgressView()
-                                .progressViewStyle(CircularProgressViewStyle())
                         } else {
                             Image(systemName: "icloud.and.arrow.down")
                                 .foregroundColor(.accentColor)
@@ -243,7 +242,7 @@ struct ModelDownloadOnboardingView: View {
                 hasStartedDownload = true
                 try await modelManager.downloadModel(baseModel)
             } catch {
-                print("Download failed: \(error)")
+                Logger.error("Download failed: \(error.localizedDescription)", category: "OnboardingView")
             }
         }
     }

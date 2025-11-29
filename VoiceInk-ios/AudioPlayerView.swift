@@ -21,7 +21,7 @@ struct AudioPlayerView: View {
                             .foregroundStyle(.tertiary)
                         Image(systemName: "waveform")
                             .foregroundStyle(.secondary)
-                        Text(timeString(duration))
+                        Text(duration.formattedTimeStringShort)
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
@@ -36,6 +36,7 @@ struct AudioPlayerView: View {
                     ProgressView()
                         .scaleEffect(0.8)
                         .tint(.blue)
+                        .id("audio-loading") // Stable ID to help SwiftUI optimize rendering
                     
                     Text("Loading...")
                         .font(.subheadline)
@@ -45,6 +46,7 @@ struct AudioPlayerView: View {
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 16)
+                .drawingGroup() // Isolate rendering to prevent flattening issues
             } else {
                 // Clean player interface
                 HStack(spacing: 16) {
@@ -97,13 +99,13 @@ struct AudioPlayerView: View {
                         
                         // Time display
                         HStack {
-                            Text(timeString(player.currentTime))
+                            Text(player.currentTime.formattedTimeStringShort)
                                 .font(.caption.monospacedDigit())
                                 .foregroundStyle(.primary)
                             
                             Spacer()
                             
-                            Text(timeString(player.duration))
+                            Text(player.duration.formattedTimeStringShort)
                                 .font(.caption.monospacedDigit())
                                 .foregroundStyle(.secondary)
                         }
@@ -123,12 +125,6 @@ struct AudioPlayerView: View {
         }
     }
     
-    private func timeString(_ seconds: Double) -> String {
-        let s = Int(seconds)
-        let m = s / 60
-        let r = s % 60
-        return String(format: "%d:%02d", m, r)
-    }
 
     private func relativeTimestamp(from date: Date) -> String {
         let formatter = RelativeDateTimeFormatter()

@@ -22,7 +22,20 @@ struct DeepgramAlternative: Decodable {
 
 struct DeepgramTranscriptionService: TranscriptionService {
     
+    /// Transcribe audio file using Deepgram API
+    /// Only supports "en" (English) and "es" (Spanish) languages
     func transcribeAudioFile(apiBaseURL: URL, apiKey: String, model: String, fileURL: URL, language: String? = nil) async throws -> String {
+        // Validate language parameter - only allow "en" or "es"
+        var validatedLanguage: String? = nil
+        if let lang = language {
+            if lang == "en" || lang == "es" {
+                validatedLanguage = lang
+            } else {
+                Logger.warning("Invalid language '\(lang)', only 'en' and 'es' are supported. Using auto-detection instead.", category: "DeepgramTranscriptionService")
+                validatedLanguage = nil
+            }
+        }
+        
         // Build query parameters
         var queryItems: [URLQueryItem] = [
             URLQueryItem(name: "model", value: model),
@@ -31,8 +44,9 @@ struct DeepgramTranscriptionService: TranscriptionService {
             URLQueryItem(name: "diarize", value: "false")
         ]
         
-        if let language = language {
-            queryItems.append(URLQueryItem(name: "language", value: language))
+        // Only include language if it's "en" or "es"
+        if let validatedLanguage {
+            queryItems.append(URLQueryItem(name: "language", value: validatedLanguage))
         }
         
         var components = URLComponents(url: apiBaseURL.appendingPathComponent("/v1/listen"), resolvingAgainstBaseURL: false)!
@@ -45,8 +59,25 @@ struct DeepgramTranscriptionService: TranscriptionService {
         request.setValue("Token \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
         
-        // Read audio file data
-        let audioData = try Data(contentsOf: fileURL)
+        // PERFORMANCE: Use async file reading to avoid blocking the thread
+        // Check file size first to avoid reading extremely large files
+        let fileAttributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let fileSize = fileAttributes[.size] as? Int64 ?? 0
+        guard fileSize > 0 && fileSize < 100_000_000 else { // 100MB limit
+            throw NSError(domain: "DeepgramAPI", code: 400, userInfo: [NSLocalizedDescriptionKey: "Audio file is too large or invalid"])
+        }
+        
+        // Read audio file data asynchronously
+        let audioData = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let data = try Data(contentsOf: fileURL)
+                    continuation.resume(returning: data)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
         request.httpBody = audioData
         
         let (data, response) = try await URLSession.shared.data(for: request)

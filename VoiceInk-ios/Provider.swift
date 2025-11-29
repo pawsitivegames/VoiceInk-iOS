@@ -101,6 +101,40 @@ enum Provider: String, CaseIterable, Codable, Identifiable {
             return [] // Hardcoded: gpt-oss-120b (no user selection)
         }
     }
+    
+    /// Returns true if this provider supports LLM calls (has post-processing models)
+    var supportsLLM: Bool {
+        return !models(for: .postProcessing).isEmpty
+    }
+    
+    /// Returns a list of providers that support LLM calls
+    static var llmProviders: [Provider] {
+        return [.groq, .openai, .cerebras, .gemini, .voiceink]
+    }
+    
+    /// UserDefaults key for API key storage
+    var apiKeyUserDefaultsKey: String {
+        switch self {
+        case .groq: return "groqAPIKey"
+        case .openai: return "openAIAPIKey"
+        case .deepgram: return "deepgramAPIKey"
+        case .cerebras: return "cerebrasAPIKey"
+        case .gemini: return "geminiAPIKey"
+        case .local, .voiceink: return "" // Not used
+        }
+    }
+    
+    /// UserDefaults key for verification status storage
+    var verificationUserDefaultsKey: String {
+        switch self {
+        case .groq: return "groqKeyVerified"
+        case .openai: return "openAIKeyVerified"
+        case .deepgram: return "deepgramKeyVerified"
+        case .cerebras: return "cerebrasKeyVerified"
+        case .gemini: return "geminiKeyVerified"
+        case .local, .voiceink: return "" // Not used
+        }
+    }
 }
 
 

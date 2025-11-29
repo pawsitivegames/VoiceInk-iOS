@@ -4,10 +4,13 @@ import SwiftData
 struct NoteDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
-    let note: Transcription
+    @Bindable var note: Transcription
     
     @State private var isRetranscribing = false
     @StateObject private var settings = AppSettings.shared
+    @State private var showCopyToast = false
+    @State private var copyToastMessage = ""
+    @State private var showShareSheet = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -48,47 +51,194 @@ struct NoteDetailView: View {
         .navigationTitle("Note")
         .navigationBarTitleDisplayMode(.inline)
         .background(Color(.systemGroupedBackground))
-    }
-    
-    private var transcriptContentView: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Transcript")
-                    .font(.headline)
-                Spacer()
-                Button(action: { copyToClipboard(displayedTranscriptText) }) {
-                    Image(systemName: "doc.on.doc")
-                        .font(.system(size: 16))
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Menu {
+                    // Copy All (English + Spanish)
+                    Button(action: { copyAllText() }) {
+                        Label("Copy All", systemImage: "doc.on.doc.fill")
+                    }
+                    
+                    Divider()
+                    
+                    // Share
+                    Button(action: { showShareSheet = true }) {
+                        Label("Share", systemImage: "square.and.arrow.up")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
                         .foregroundStyle(.blue)
                 }
             }
+        }
+        .sheet(isPresented: $showShareSheet) {
+            ShareSheet(activityItems: [allTextForSharing])
+        }
+        .overlay(alignment: .bottom) {
+            if showCopyToast {
+                copyToastView
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .animation(.spring(response: 0.3, dampingFraction: 0.7), value: showCopyToast)
+            }
+        }
+    }
+    
+    private var transcriptContentView: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            // Side-by-side layout for both languages
+            if let translatedText = note.translatedText, !translatedText.isEmpty, note.transcriptionStatus == .completed {
+                // Both languages available - show side-by-side
+                HStack(alignment: .top, spacing: 16) {
+                    // Primary Language (detected)
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text(primaryLanguageLabel)
+                                .font(.headline)
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Button(action: { copyToClipboardWithMessage(displayedTranscriptText, message: "\(primaryLanguageLabel) text copied") }) {
+                                Image(systemName: "doc.on.doc")
+                                    .font(.caption)
+                                    .foregroundStyle(.blue)
+                            }
+                        }
+                        
+                        Text(displayedTranscriptText)
+                            .font(.body)
+                            .textSelection(.enabled)
+                            .padding()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                            .background(Color(.secondarySystemGroupedBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                    .frame(maxWidth: .infinity)
+                    
+                    // Translation Language
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text(translationLanguageLabel)
+                                .font(.headline)
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Button(action: { copyToClipboardWithMessage(translatedText, message: "\(translationLanguageLabel) text copied") }) {
+                                Image(systemName: "doc.on.doc")
+                                    .font(.caption)
+                                    .foregroundStyle(.blue)
+                            }
+                        }
+                        
+                        Text(translatedText)
+                            .font(.body)
+                            .textSelection(.enabled)
+                            .padding()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                            .background(Color(.secondarySystemGroupedBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            } else {
+                // Only primary language available (or translation pending)
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text(primaryLanguageLabel)
+                            .font(.headline)
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Button(action: { copyToClipboardWithMessage(displayedTranscriptText, message: "\(primaryLanguageLabel) text copied") }) {
+                            Image(systemName: "doc.on.doc")
+                                .font(.caption)
+                                .foregroundStyle(.blue)
+                        }
+                    }
+                    
+                    Text(displayedTranscriptText)
+                        .font(.body)
+                        .textSelection(.enabled)
+                        .padding()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(.secondarySystemGroupedBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    
+                    if note.transcriptionStatus == .completed && note.translatedText == nil {
+                        // Translation pending indicator
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                                .id("translation-pending-\(note.id)") // Stable ID to help SwiftUI optimize rendering
+                            Text("Translation pending...")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding()
+                        .frame(maxWidth: .infinity)
+                        .background(Color(.tertiarySystemGroupedBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .drawingGroup() // Isolate rendering to prevent flattening issues
+                    }
+                }
+            }
             
-            Text(displayedTranscriptText)
-                .font(.body)
-                .textSelection(.enabled)
-                .padding()
-                .background(Color(.secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 16))
+            // Copy All Button - key functionality, one tap to copy everything
+            Button(action: { copyAllText() }) {
+                HStack {
+                    Image(systemName: "doc.on.doc.fill")
+                    Text("Copy All Text")
+                        .fontWeight(.semibold)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+            .controlSize(.regular)
         }
     }
     
     private var displayedTranscriptText: String {
-        // Backend logic: Show post-processed result if available, otherwise show original
-        if let enhancedText = note.enhancedText, !enhancedText.isEmpty {
-            return enhancedText
-        } else if !note.text.isEmpty {
-            return note.text
+        return note.displayText
+    }
+    
+    /// Get the primary language label based on detected language
+    private var primaryLanguageLabel: String {
+        if note.detectedLanguage == "es" {
+            return "Spanish"
         } else {
-            return "No content available."
+            return "English"
         }
     }
     
-    private var hasAudioFile: Bool {
-        guard let audioPath = note.fullAudioPath,
-              FileManager.default.fileExists(atPath: audioPath) else {
-            return false
+    /// Get the translation language label based on detected language
+    private var translationLanguageLabel: String {
+        if note.detectedLanguage == "es" {
+            return "English"
+        } else {
+            return "Spanish"
         }
-        return true
+    }
+    
+    /// Get the primary language flag emoji
+    private var primaryLanguageFlag: String {
+        if note.detectedLanguage == "es" {
+            return "🇪🇸"
+        } else {
+            return "🇺🇸"
+        }
+    }
+    
+    /// Get the translation language flag emoji
+    private var translationLanguageFlag: String {
+        if note.detectedLanguage == "es" {
+            return "🇺🇸"
+        } else {
+            return "🇪🇸"
+        }
+    }
+    
+    // Lazy evaluation - only check file existence when needed
+    private var hasAudioFile: Bool {
+        guard let audioPath = note.fullAudioPath else { return false }
+        return FileManager.default.fileExists(atPath: audioPath)
     }
 
     // Summary card removed per design feedback
@@ -152,17 +302,9 @@ struct NoteDetailView: View {
         }
     }
     
-    private func timeString(_ seconds: Double) -> String {
-        let s = Int(seconds)
-        let m = s / 60
-        let r = s % 60
-        return String(format: "%02d:%02d", m, r)
-    }
     
     private var relativeTimestamp: String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter.localizedString(for: note.timestamp, relativeTo: Date())
+        return note.timestamp.relativeTimeString
     }
     
     private var transcriptionStatusView: some View {
@@ -171,12 +313,12 @@ struct NoteDetailView: View {
                 Image(systemName: note.transcriptionStatus == .failed ? "exclamationmark.triangle.fill" : "clock.fill")
                     .foregroundStyle(note.transcriptionStatus == .failed ? .red : .orange)
                 
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(note.transcriptionStatus == .failed ? "Transcription Failed" : "Transcription Pending")
                         .font(.subheadline.weight(.medium))
                     if let error = note.transcriptionError, !error.isEmpty {
                         Text(error)
-                            .font(.callout)
+                            .font(.caption)
                             .textSelection(.enabled)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -186,39 +328,21 @@ struct NoteDetailView: View {
                 Spacer()
             }
             
-            // Mode selection for re-transcription
-            if !settings.modes.isEmpty && !isRetranscribing {
-                VStack(spacing: 8) {
-                    if settings.modes.count > 1 {
-                        Picker("Mode", selection: $settings.selectedModeId) {
-                            ForEach(settings.modes) { mode in
-                                Text(mode.name).tag(mode.id as UUID?)
-                            }
-                        }
-                        .pickerStyle(.wheel)
-                        .frame(height: 80)
-                    } else if let singleMode = settings.modes.first {
-                        Text(singleMode.name)
-                            .font(.title2.bold())
-                            .foregroundStyle(.primary)
-                    }
-                }
-            }
-            
             if isRetranscribing {
                 HStack {
                     ProgressView()
                         .scaleEffect(0.8)
+                        .id("retranscribing-\(note.id)") // Stable ID to help SwiftUI optimize rendering
                     Text("Retranscribing...")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
+                .drawingGroup() // Isolate rendering to prevent flattening issues
             } else {
                 Button {
                     retranscribe()
                 } label: {
-                    Label("Retry Transcription", systemImage: "arrow.clockwise")
-                        .fontWeight(.semibold)
+                    Label("Retry", systemImage: "arrow.clockwise")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -239,6 +363,7 @@ struct NoteDetailView: View {
             
             do {
                 _ = try await TranscriptionRetryService.shared.retranscribe(note: note)
+                modelContext.processPendingChanges()
                 try? modelContext.save() // Save the updated note
             } catch {
                 // Error handling is already done in the service
@@ -246,15 +371,65 @@ struct NoteDetailView: View {
         }
     }
     
-    private func copyToClipboard(_ text: String) {
-        UIPasteboard.general.string = text
+    private func copyToClipboardWithMessage(_ text: String, message: String = "Copied to clipboard") {
+        _ = copyToClipboard(text)
         
-        // Optional: Add haptic feedback
-        let impactFeedback = UIImpactFeedbackGenerator(style: .light)
-        impactFeedback.impactOccurred()
+        // Show toast
+        copyToastMessage = message
+        withAnimation {
+            showCopyToast = true
+        }
+        
+        // Hide toast after 2 seconds
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            withAnimation {
+                showCopyToast = false
+            }
+        }
     }
     
+    private func copyAllText() {
+        let allText = note.allTextForSharing(translationLabel: translationLanguageLabel)
+        copyToClipboardWithMessage(allText, message: "All text copied")
+    }
+    
+    private var allTextForSharing: String {
+        return note.allTextForSharing(translationLabel: translationLanguageLabel)
+    }
+    
+    private var copyToastView: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.white)
+            Text(copyToastMessage)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .background {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(.black.opacity(0.85))
+        }
+        .shadow(color: .black.opacity(0.2), radius: 8, x: 0, y: 4)
+        .padding(.horizontal, 20)
+        .padding(.bottom, 100)
+    }
+}
 
+// MARK: - Share Sheet
+struct ShareSheet: UIViewControllerRepresentable {
+    let activityItems: [Any]
+    
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        let controller = UIActivityViewController(
+            activityItems: activityItems,
+            applicationActivities: nil
+        )
+        return controller
+    }
+    
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
 

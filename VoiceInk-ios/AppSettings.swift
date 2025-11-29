@@ -27,46 +27,77 @@ final class AppSettings: ObservableObject {
 
 
 
-    // Separate API keys per provider
-    @Published var groqAPIKey: String {
-        didSet { saveAPIKey(groqAPIKey, forKey: "groqAPIKey") }
+    // Dictionary-based storage for API keys (DRY principle)
+    // Note: We can't use @Published on dictionaries directly, so we'll use objectWillChange manually
+    private var apiKeys: [Provider: String] = [:] {
+        didSet { objectWillChange.send() }
     }
-
-    @Published var openAIAPIKey: String {
-        didSet { saveAPIKey(openAIAPIKey, forKey: "openAIAPIKey") }
-    }
-
-    @Published var deepgramAPIKey: String {
-        didSet { saveAPIKey(deepgramAPIKey, forKey: "deepgramAPIKey") }
-    }
-
-    @Published var cerebrasAPIKey: String {
-        didSet { saveAPIKey(cerebrasAPIKey, forKey: "cerebrasAPIKey") }
-    }
-
-    @Published var geminiAPIKey: String {
-        didSet { saveAPIKey(geminiAPIKey, forKey: "geminiAPIKey") }
+    private var keyVerificationStatus: [Provider: Bool] = [:] {
+        didSet { objectWillChange.send() }
     }
     
-    // Track verification status per provider
-    @Published var groqKeyVerified: Bool {
-        didSet { UserDefaults.standard.set(groqKeyVerified, forKey: "groqKeyVerified") }
+    // Published properties for backward compatibility (computed from dictionaries)
+    var groqAPIKey: String {
+        get { apiKeys[.groq] ?? "" }
+        set { setAPIKeyValue(newValue, for: .groq) }
+    }
+
+    var openAIAPIKey: String {
+        get { apiKeys[.openai] ?? "" }
+        set { setAPIKeyValue(newValue, for: .openai) }
+    }
+
+    var deepgramAPIKey: String {
+        get { apiKeys[.deepgram] ?? "" }
+        set { setAPIKeyValue(newValue, for: .deepgram) }
+    }
+
+    var cerebrasAPIKey: String {
+        get { apiKeys[.cerebras] ?? "" }
+        set { setAPIKeyValue(newValue, for: .cerebras) }
+    }
+
+    var geminiAPIKey: String {
+        get { apiKeys[.gemini] ?? "" }
+        set { setAPIKeyValue(newValue, for: .gemini) }
     }
     
-    @Published var openAIKeyVerified: Bool {
-        didSet { UserDefaults.standard.set(openAIKeyVerified, forKey: "openAIKeyVerified") }
+    // Published properties for verification status (computed from dictionaries)
+    var groqKeyVerified: Bool {
+        get { keyVerificationStatus[.groq] ?? false }
+        set { keyVerificationStatus[.groq] = newValue; UserDefaults.standard.set(newValue, forKey: "groqKeyVerified") }
+    }
+    
+    var openAIKeyVerified: Bool {
+        get { keyVerificationStatus[.openai] ?? false }
+        set { keyVerificationStatus[.openai] = newValue; UserDefaults.standard.set(newValue, forKey: "openAIKeyVerified") }
     }
 
-    @Published var deepgramKeyVerified: Bool {
-        didSet { UserDefaults.standard.set(deepgramKeyVerified, forKey: "deepgramKeyVerified") }
+    var deepgramKeyVerified: Bool {
+        get { keyVerificationStatus[.deepgram] ?? false }
+        set { keyVerificationStatus[.deepgram] = newValue; UserDefaults.standard.set(newValue, forKey: "deepgramKeyVerified") }
     }
 
-    @Published var cerebrasKeyVerified: Bool {
-        didSet { UserDefaults.standard.set(cerebrasKeyVerified, forKey: "cerebrasKeyVerified") }
+    var cerebrasKeyVerified: Bool {
+        get { keyVerificationStatus[.cerebras] ?? false }
+        set { keyVerificationStatus[.cerebras] = newValue; UserDefaults.standard.set(newValue, forKey: "cerebrasKeyVerified") }
     }
 
-    @Published var geminiKeyVerified: Bool {
-        didSet { UserDefaults.standard.set(geminiKeyVerified, forKey: "geminiKeyVerified") }
+    var geminiKeyVerified: Bool {
+        get { keyVerificationStatus[.gemini] ?? false }
+        set { keyVerificationStatus[.gemini] = newValue; UserDefaults.standard.set(newValue, forKey: "geminiKeyVerified") }
+    }
+    
+    // Helper to set API key value and save (DRY)
+    private func setAPIKeyValue(_ value: String, for provider: Provider) {
+        let oldValue = apiKeys[provider] ?? ""
+        apiKeys[provider] = value
+        saveAPIKey(value, forKey: provider.apiKeyUserDefaultsKey)
+        // Reset verification if key changed
+        if oldValue != value {
+            keyVerificationStatus[provider] = false
+            UserDefaults.standard.set(false, forKey: provider.verificationUserDefaultsKey)
+        }
     }
     
     // Audio session timeout configuration
@@ -88,16 +119,12 @@ final class AppSettings: ObservableObject {
         }
         
 
-        self.groqAPIKey = AppSettings.loadAPIKey(forKey: "groqAPIKey")
-        self.openAIAPIKey = AppSettings.loadAPIKey(forKey: "openAIAPIKey")
-        self.deepgramAPIKey = AppSettings.loadAPIKey(forKey: "deepgramAPIKey")
-        self.cerebrasAPIKey = AppSettings.loadAPIKey(forKey: "cerebrasAPIKey")
-        self.geminiAPIKey = AppSettings.loadAPIKey(forKey: "geminiAPIKey")
-        self.groqKeyVerified = UserDefaults.standard.bool(forKey: "groqKeyVerified")
-        self.openAIKeyVerified = UserDefaults.standard.bool(forKey: "openAIKeyVerified")
-        self.deepgramKeyVerified = UserDefaults.standard.bool(forKey: "deepgramKeyVerified")
-        self.cerebrasKeyVerified = UserDefaults.standard.bool(forKey: "cerebrasKeyVerified")
-        self.geminiKeyVerified = UserDefaults.standard.bool(forKey: "geminiKeyVerified")
+        // Load API keys into dictionary
+        let providers: [Provider] = [.groq, .openai, .deepgram, .cerebras, .gemini]
+        for provider in providers {
+            apiKeys[provider] = AppSettings.loadAPIKey(forKey: provider.apiKeyUserDefaultsKey)
+            keyVerificationStatus[provider] = UserDefaults.standard.bool(forKey: provider.verificationUserDefaultsKey)
+        }
         
         // Load audio session timeout (default: 90 seconds)
         self.audioSessionTimeoutSeconds = UserDefaults.standard.object(forKey: "audioSessionTimeoutSeconds") as? Int ?? 90
@@ -105,77 +132,72 @@ final class AppSettings: ObservableObject {
     }
 
     func apiKey(for provider: Provider) -> String {
-        switch provider { 
-        case .groq: return groqAPIKey
-        case .openai: return openAIAPIKey
-        case .deepgram: return deepgramAPIKey
-        case .cerebras: return cerebrasAPIKey
-        case .gemini: return geminiAPIKey
-        case .local: return "local" // Local transcription doesn't need an API key
-        case .voiceink: return "" // TODO: Replace with actual VoiceInk API key
+        switch provider {
+        case .groq, .openai, .deepgram, .cerebras, .gemini:
+            return apiKeys[provider] ?? ""
+        case .local:
+            return "local" // Local transcription doesn't need an API key
+        case .voiceink:
+            return "" // TODO: Replace with actual VoiceInk API key
         }
     }
 
     func setAPIKey(_ key: String, for provider: Provider) {
-        switch provider { 
-        case .groq: 
-            groqAPIKey = key
-            // Reset verification status when key changes
-            if groqAPIKey != key { groqKeyVerified = false }
-        case .openai: 
-            openAIAPIKey = key
-            // Reset verification status when key changes
-            if openAIAPIKey != key { openAIKeyVerified = false }
-        case .deepgram:
-            deepgramAPIKey = key
-            // Reset verification status when key changes
-            if deepgramAPIKey != key { deepgramKeyVerified = false }
-        case .cerebras:
-            cerebrasAPIKey = key
-            // Reset verification status when key changes
-            if cerebrasAPIKey != key { cerebrasKeyVerified = false }
-        case .gemini:
-            geminiAPIKey = key
-            // Reset verification status when key changes
-            if geminiAPIKey != key { geminiKeyVerified = false }
-        case .local:
-            break // Local provider doesn't use API keys
-        case .voiceink:
-            break // VoiceInk uses hardcoded API key
+        switch provider {
+        case .groq, .openai, .deepgram, .cerebras, .gemini:
+            setAPIKeyValue(key, for: provider)
+        case .local, .voiceink:
+            break // These providers don't use API keys
         }
     }
     
     func isKeyVerified(for provider: Provider) -> Bool {
         switch provider {
-        case .groq: return groqKeyVerified && !groqAPIKey.isEmpty
-        case .openai: return openAIKeyVerified && !openAIAPIKey.isEmpty
-        case .deepgram: return deepgramKeyVerified && !deepgramAPIKey.isEmpty
-        case .cerebras: return cerebrasKeyVerified && !cerebrasAPIKey.isEmpty
-        case .gemini: return geminiKeyVerified && !geminiAPIKey.isEmpty
-        case .local: return LocalModelManager.shared.hasAvailableModel
-        case .voiceink: return true // VoiceInk uses hardcoded API key, always verified
+        case .groq, .openai, .deepgram, .cerebras, .gemini:
+            let key = apiKeys[provider] ?? ""
+            let verified = keyVerificationStatus[provider] ?? false
+            return verified && !key.isEmpty
+        case .local:
+            return LocalModelManager.shared.hasAvailableModel
+        case .voiceink:
+            return true // VoiceInk uses hardcoded API key, always verified
         }
     }
     
     func setKeyVerified(_ verified: Bool, for provider: Provider) {
         switch provider {
-        case .groq: groqKeyVerified = verified
-        case .openai: openAIKeyVerified = verified
-        case .deepgram: deepgramKeyVerified = verified
-        case .cerebras: cerebrasKeyVerified = verified
-        case .gemini: geminiKeyVerified = verified
-        case .local: break // Local model status is handled by LocalModelManager
-        case .voiceink: break // VoiceInk uses hardcoded API key, no verification needed
+        case .groq, .openai, .deepgram, .cerebras, .gemini:
+            keyVerificationStatus[provider] = verified
+            UserDefaults.standard.set(verified, forKey: provider.verificationUserDefaultsKey)
+        case .local, .voiceink:
+            break // These providers don't need verification
         }
     }
 
 
     // MARK: - Modes Management
     
+    // Debounce saves to avoid excessive UserDefaults writes
+    private var saveModesWorkItem: DispatchWorkItem?
+    
     private func saveModes() {
-        if let data = try? JSONEncoder().encode(modes) {
-            UserDefaults.standard.set(data, forKey: "modes")
+        // Cancel any pending save
+        saveModesWorkItem?.cancel()
+        
+        // Schedule save after a short delay to batch multiple rapid changes
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            if let data = try? JSONEncoder().encode(self.modes) {
+                UserDefaults.standard.set(data, forKey: "modes")
+            }
         }
+        saveModesWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: workItem)
+    }
+    
+    deinit {
+        // Ensure pending saves complete
+        saveModesWorkItem?.perform()
     }
     
     private static func loadModes() -> [Mode] {
@@ -265,12 +287,44 @@ final class AppSettings: ObservableObject {
     func voiceInkPostProcessingModel() -> String {
         return "openai/gpt-oss-120b"
     }
+    
+    // MARK: - Translation Provider Selection
+    
+    /// Finds an available LLM provider for translation (one that supports LLM and has an API key)
+    func findAvailableLLMProvider() -> (provider: Provider, apiKey: String, model: String)? {
+        // First, try the post-processing provider if it supports LLM
+        let postProcessingProvider = effectivePostProcessingProvider
+        if postProcessingProvider.supportsLLM {
+            let apiKey = self.apiKey(for: postProcessingProvider)
+            if !apiKey.isEmpty {
+                let model = effectivePostProcessingModel
+                return (postProcessingProvider, apiKey, model)
+            }
+        }
+        
+        // Otherwise, try other LLM providers in order of preference
+        let preferredProviders: [Provider] = [.groq, .openai, .cerebras, .gemini, .voiceink]
+        for provider in preferredProviders {
+            if provider.supportsLLM {
+                let apiKey = self.apiKey(for: provider)
+                if !apiKey.isEmpty {
+                    // Get the first available model for this provider
+                    let models = provider.models(for: .postProcessing)
+                    if let firstModel = models.first {
+                        return (provider, apiKey, firstModel)
+                    }
+                }
+            }
+        }
+        
+        return nil
+    }
 
     private func saveAPIKey(_ key: String, forKey account: String) {
         guard let data = key.data(using: .utf8) else { return }
         let status = KeychainService.save(key: account, data: data)
         if status != errSecSuccess {
-            print("Error saving API key to keychain: \(status)")
+            Logger.error("Error saving API key to keychain: \(status)", category: "AppSettings")
         }
     }
     

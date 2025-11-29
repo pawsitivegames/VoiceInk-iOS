@@ -30,7 +30,9 @@ struct ProviderAPIKeyView: View {
                         .disabled(tempKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         Spacer()
                         if isVerifying {
-                            ProgressView().progressViewStyle(.circular)
+                            ProgressView()
+                                .id("verifying-\(provider.rawValue)") // Stable ID to help SwiftUI optimize rendering
+                                .drawingGroup() // Isolate rendering to prevent flattening issues
                         } else {
                             Button(action: verifyKey) {
                                 Label("Verify", systemImage: "checkmark.seal")

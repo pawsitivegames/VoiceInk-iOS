@@ -119,7 +119,7 @@ class LocalModelManager: ObservableObject {
     /// Download a specific model
     func downloadModel(_ model: WhisperModel) async throws {
         guard !isDownloading[model.id, default: false] else {
-            print("LocalModelManager: Model \(model.name) is already being downloaded")
+            Logger.warning("Model \(model.name) is already being downloaded", category: "LocalModelManager")
             return
         }
         
@@ -127,7 +127,7 @@ class LocalModelManager: ObservableObject {
             throw ModelDownloadError.invalidURL
         }
         
-        print("LocalModelManager: Starting download of \(model.name) from \(model.downloadURL)")
+        Logger.debug("Starting download of \(model.name) from \(model.downloadURL)", category: "LocalModelManager")
         
         isDownloading[model.id] = true
         downloadProgress[model.id] = 0.0
@@ -178,20 +178,20 @@ class LocalModelManager: ObservableObject {
         
         if let error = error {
             downloadError = "Download failed: \(error.localizedDescription)"
-            print("LocalModelManager: Download failed for \(model.name): \(error)")
+            Logger.error("Download failed for \(model.name): \(error.localizedDescription)", category: "LocalModelManager")
             return
         }
         
         guard let response = response as? HTTPURLResponse,
               (200...299).contains(response.statusCode) else {
             downloadError = "Server error during download"
-            print("LocalModelManager: Server error for \(model.name)")
+            Logger.error("Server error for \(model.name)", category: "LocalModelManager")
             return
         }
         
         guard let temporaryURL = temporaryURL else {
             downloadError = "No file received"
-            print("LocalModelManager: No file received for \(model.name)")
+            Logger.error("No file received for \(model.name)", category: "LocalModelManager")
             return
         }
         
@@ -206,12 +206,12 @@ class LocalModelManager: ObservableObject {
             
             try FileManager.default.moveItem(at: temporaryURL, to: finalURL)
             
-            print("LocalModelManager: Successfully downloaded \(model.name) to \(finalURL.path)")
+            Logger.info("Successfully downloaded \(model.name) to \(finalURL.path)", category: "LocalModelManager")
             downloadProgress[model.id] = 1.0
             
         } catch {
             downloadError = "Failed to save model: \(error.localizedDescription)"
-            print("LocalModelManager: Failed to save \(model.name): \(error)")
+            Logger.error("Failed to save \(model.name): \(error.localizedDescription)", category: "LocalModelManager")
         }
     }
     
@@ -227,20 +227,20 @@ class LocalModelManager: ObservableObject {
     /// Delete a downloaded model
     func deleteModel(_ model: WhisperModel) throws {
         guard model.isDownloaded else { 
-            print("LocalModelManager: Model \(model.name) is not downloaded")
+            Logger.warning("Model \(model.name) is not downloaded", category: "LocalModelManager")
             return 
         }
         
         do {
             try FileManager.default.removeItem(at: model.fileURL)
-            print("LocalModelManager: Successfully deleted model \(model.name)")
+            Logger.info("Successfully deleted model \(model.name)", category: "LocalModelManager")
             
             // Trigger UI update
             DispatchQueue.main.async {
                 self.objectWillChange.send()
             }
         } catch {
-            print("LocalModelManager: Failed to delete model \(model.name): \(error)")
+            Logger.error("Failed to delete model \(model.name): \(error.localizedDescription)", category: "LocalModelManager")
             throw error
         }
     }
@@ -299,12 +299,12 @@ class LocalModelManager: ObservableObject {
         
         // Check if already downloaded
         guard !baseModel.isCoreMLEncoderDownloaded else {
-            print("LocalModelManager: Core ML encoder for \(baseModel.name) is already downloaded")
+            Logger.debug("Core ML encoder for \(baseModel.name) is already downloaded", category: "LocalModelManager")
             return
         }
         
         guard !isDownloading[coreMLModel.id, default: false] else {
-            print("LocalModelManager: Core ML encoder for \(baseModel.name) is already being downloaded")
+            Logger.warning("Core ML encoder for \(baseModel.name) is already being downloaded", category: "LocalModelManager")
             return
         }
         
@@ -314,7 +314,7 @@ class LocalModelManager: ObservableObject {
             throw ModelDownloadError.invalidURL
         }
         
-        print("LocalModelManager: Starting download of Core ML encoder for \(baseModel.name)")
+        Logger.debug("Starting download of Core ML encoder for \(baseModel.name)", category: "LocalModelManager")
         
         isDownloading[coreMLModel.id] = true
         downloadProgress[coreMLModel.id] = 0.0
@@ -342,8 +342,8 @@ class LocalModelManager: ObservableObject {
             let contents = try FileManager.default.contentsOfDirectory(at: modelsDir, includingPropertiesForKeys: [.fileSizeKey])
             
             for fileURL in contents {
-                // Count both .bin models and .mlmodelc encoders
-                if fileURL.pathExtension == "bin" || fileURL.pathExtension == "mlmodelc" {
+                // Count both .bin models, .mlmodelc encoders, and .gguf translation models
+                if fileURL.pathExtension == "bin" || fileURL.pathExtension == "mlmodelc" || fileURL.pathExtension == "gguf" {
                     modelCount += 1
                     if let resourceValues = try? fileURL.resourceValues(forKeys: [.fileSizeKey]),
                        let fileSize = resourceValues.fileSize {
@@ -352,9 +352,77 @@ class LocalModelManager: ObservableObject {
                 }
             }
         } catch {
-            print("LocalModelManager: Error calculating disk usage: \(error)")
+            Logger.warning("Error calculating disk usage: \(error.localizedDescription)", category: "LocalModelManager")
         }
         
         return (totalSize, modelCount)
+    }
+    
+    // MARK: - Translation Models (llama.cpp)
+    
+    /// Translation model directory (separate from Whisper models)
+    nonisolated static var translationModelsDirectory: URL {
+        let documentsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let modelsDir = documentsDir.appendingPathComponent("TranslationModels")
+        
+        // Create directory if it doesn't exist
+        if !FileManager.default.fileExists(atPath: modelsDir.path) {
+            try? FileManager.default.createDirectory(at: modelsDir, withIntermediateDirectories: true)
+        }
+        
+        return modelsDir
+    }
+    
+    /// Get the path to the translation model, if available
+    /// For now, we'll use a simple naming convention: translation-model.gguf
+    var translationModelPath: String? {
+        let modelsDir = Self.translationModelsDirectory
+        let modelFile = modelsDir.appendingPathComponent("translation-model.gguf")
+        
+        if FileManager.default.fileExists(atPath: modelFile.path) {
+            return modelFile.path
+        }
+        
+        // Also check for any .gguf file in the directory
+        do {
+            let contents = try FileManager.default.contentsOfDirectory(at: modelsDir, includingPropertiesForKeys: nil)
+            if let firstGGUF = contents.first(where: { $0.pathExtension == "gguf" }) {
+                return firstGGUF.path
+            }
+        } catch {
+            Logger.warning("Error checking for translation models: \(error.localizedDescription)", category: "LocalModelManager")
+        }
+        
+        return nil
+    }
+    
+    /// Check if translation model is available
+    var hasTranslationModel: Bool {
+        translationModelPath != nil
+    }
+    
+    /// Get recommended translation models for English-Spanish translation
+    /// These are small, quantized models suitable for mobile devices
+    static func recommendedTranslationModels() -> [(name: String, url: String, size: String, description: String)] {
+        return [
+            (
+                name: "TinyLlama-1.1B-Chat (Q4_0)",
+                url: "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_0.gguf",
+                size: "~700 MB",
+                description: "Very small model, fast inference, good for simple translations"
+            ),
+            (
+                name: "Phi-2 (Q4_0)",
+                url: "https://huggingface.co/microsoft/phi-2/resolve/main/phi-2.Q4_0.gguf",
+                size: "~1.5 GB",
+                description: "Small but capable model, better translation quality"
+            ),
+            (
+                name: "Llama-3.2-1B-Instruct (Q4_0)",
+                url: "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_0.gguf",
+                size: "~700 MB",
+                description: "Instruction-tuned model, excellent for translation tasks"
+            )
+        ]
     }
 }

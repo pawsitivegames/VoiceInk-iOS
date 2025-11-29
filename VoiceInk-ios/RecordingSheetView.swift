@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct RecordingSheetView: View {
     @ObservedObject var recordingManager: RecordingManager
@@ -7,24 +8,50 @@ struct RecordingSheetView: View {
     let onStop: () -> Void
     
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 20) {
             // Header
             HStack {
                 Button("Cancel", action: onCancel)
-                    .font(.body)
+                    .font(.system(size: 17, weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Cancel recording")
+                    .accessibilityHint("Double tap to cancel and discard this recording")
                 Spacer()
-                Text(timeString(recordingManager.currentDuration))
-                    .font(.title2.monospacedDigit())
-                    .fontWeight(.semibold)
+                Text(recordingManager.currentDuration.formattedTimeString)
+                    .font(.system(size: 28, weight: .bold, design: .rounded).monospacedDigit())
                     .foregroundStyle(.primary)
+                    .contentTransition(.numericText())
+                    .animation(.easeInOut(duration: 0.2), value: recordingManager.currentDuration)
+                    .accessibilityLabel("Recording duration: \(recordingManager.currentDuration.formattedTimeString)")
             }
-            .padding(.top, 8)
+            .padding(.top, 12)
+
+            // Language Learning Hint
+            HStack(spacing: 10) {
+                Image(systemName: "lightbulb.fill")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.orange)
+                Text("Speak in English or Spanish to see instant translations")
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color(.tertiarySystemGroupedBackground))
+            )
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Hint: Speak in English or Spanish to see instant translations")
 
             // Mode Picker
-            VStack(spacing: 8) {
+            VStack(spacing: 10) {
                 Text("Mode")
-                    .font(.subheadline)
+                    .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 
                 if settings.modes.count > 1 {
                     Picker("Mode", selection: $settings.selectedModeId) {
@@ -34,34 +61,44 @@ struct RecordingSheetView: View {
                     }
                     .pickerStyle(.wheel)
                     .frame(height: 80)
+                    .accessibilityLabel("Recording mode picker")
                 } else if let singleMode = settings.modes.first {
                     Text(singleMode.name)
-                        .font(.title2.bold())
+                        .font(.system(size: 22, weight: .bold))
                         .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityLabel("Recording mode: \(singleMode.name)")
                 }
             }
             
             // Stop Button - Matching main button style
-            Button(action: onStop) {
-                Label("Stop Recording", systemImage: "stop.fill")
-                    .fontWeight(.semibold)
-                    .frame(maxWidth: .infinity)
+            Button(action: {
+                // Haptic feedback
+                let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
+                impactFeedback.impactOccurred()
+                onStop()
+            }) {
+                HStack(spacing: 10) {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                    Text("Stop Recording")
+                        .fontWeight(.semibold)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 56)
             }
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.capsule)
             .tint(.red)
             .controlSize(.large)
+            .shadow(color: Color.red.opacity(0.3), radius: 8, x: 0, y: 4)
+            .accessibilityLabel("Stop recording")
+            .accessibilityHint("Double tap to stop and save the recording")
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 16)
     }
     
-    private func timeString(_ seconds: Double) -> String {
-        let s = Int(seconds)
-        let m = s / 60
-        let r = s % 60
-        return String(format: "%02d:%02d", m, r)
-    }
 }
 
 #Preview {

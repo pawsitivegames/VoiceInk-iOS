@@ -103,7 +103,7 @@ struct SettingsView: View {
             }
             try? context.save()
         } catch {
-            print("Failed to reset SwiftData: \(error)")
+            Logger.error("Failed to reset SwiftData: \(error.localizedDescription)", category: "SettingsView")
         }
 
         // 2) Delete audio files directory

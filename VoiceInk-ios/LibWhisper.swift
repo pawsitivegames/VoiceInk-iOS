@@ -11,7 +11,7 @@ import whisper
 #else
 #error("Unable to import whisper module. Please check your project configuration.")
 #endif
-import os
+import os.log
 
 enum WhisperError: Error {
     case couldNotInitializeContext
@@ -21,7 +21,7 @@ enum WhisperError: Error {
 actor WhisperContext {
     private var context: OpaquePointer?
     private var vadModelPath: String?
-    private let logger = Logger(subsystem: "com.prakashjoshipax.voiceink", category: "WhisperContext")
+    private let logger = OSLog(subsystem: "com.pawsitivegames.voiceink", category: "WhisperContext")
 
     private init() {}
 
@@ -35,13 +35,28 @@ actor WhisperContext {
         }
     }
 
-    func fullTranscribe(samples: [Float]) -> Bool {
+    func fullTranscribe(samples: [Float], language: String? = nil) -> Bool {
         guard let context = context else { return false }
         
         let maxThreads = max(1, min(8, cpuCount() - 2))
         var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
         
-        params.language = nil
+        // Set language if provided, otherwise use auto-detection (nil)
+        // Only accept "en" or "es" - restrict to English and Spanish only
+        if let language = language {
+            // Validate that language is either "en" or "es"
+            if language == "en" || language == "es" {
+                // Convert Swift String to C string for Whisper (similar to VAD model path)
+                params.language = (language as NSString).utf8String
+                os_log("Whisper: Using specified language: %{public}@", log: logger, type: .info, language)
+            } else {
+                os_log("Whisper: Invalid language '%{public}@', only 'en' and 'es' are supported. Using auto-detection instead.", log: logger, type: .default, language)
+                params.language = nil
+            }
+        } else {
+            params.language = nil
+            os_log("Whisper: Using auto-detection for language (will filter to English/Spanish only)", log: logger, type: .info)
+        }
         
         params.print_realtime = true
         params.print_progress = false
@@ -52,7 +67,15 @@ actor WhisperContext {
         params.offset_ms = 0
         params.no_context = true
         params.single_segment = false
-        params.temperature = 0.2
+        
+        // Use lower temperature for Spanish to be more conservative with accented speech
+        // This helps with non-native pronunciation
+        if let lang = language, lang == "es" {
+            params.temperature = 0.0  // More deterministic for Spanish
+            os_log("Whisper: Using conservative temperature (0.0) for Spanish transcription", log: logger, type: .info)
+        } else {
+            params.temperature = 0.2  // Standard temperature for English/auto-detect
+        }
 
         whisper_reset_timings(context)
         
@@ -71,13 +94,13 @@ actor WhisperContext {
             params.vad_params = vadParams
         } else {
             params.vad = false
-            logger.warning("VAD model path not found, VAD will be disabled.")
+            os_log("VAD model path not found, VAD will be disabled.", log: logger, type: .default)
         }
         
         var success = true
         samples.withUnsafeBufferPointer { samplesBuffer in
             if whisper_full(context, params, samplesBuffer.baseAddress, Int32(samplesBuffer.count)) != 0 {
-                logger.error("Failed to run whisper_full. VAD enabled: \(params.vad)")
+                os_log("Failed to run whisper_full. VAD enabled: %d", log: logger, type: .error, params.vad ? 1 : 0)
                 success = false
             }
         }
@@ -94,6 +117,29 @@ actor WhisperContext {
             }
         }
         return transcription.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    
+    /// Get the detected language code from Whisper
+    /// Only returns "en" (English) or "es" (Spanish), or nil if language could not be determined or is not English/Spanish
+    func getDetectedLanguage() -> String? {
+        guard let context = context else { return nil }
+        
+        // Whisper provides language ID after transcription
+        let langId = whisper_full_lang_id(context)
+        
+        // Only support English and Spanish
+        // Whisper language IDs: 0=en, 3=es
+        switch langId {
+        case 0:
+            os_log("Whisper: Detected language ID %d -> English", log: logger, type: .info, langId)
+            return "en"
+        case 3:
+            os_log("Whisper: Detected language ID %d -> Spanish", log: logger, type: .info, langId)
+            return "es"
+        default:
+            os_log("Whisper: Detected language ID %d is not English or Spanish, returning nil", log: logger, type: .default, langId)
+            return nil
+        }
     }
 
     static func createContext(path: String) async throws -> WhisperContext {
@@ -118,9 +164,9 @@ actor WhisperContext {
         params.flash_attn = false
         
         #if targetEnvironment(simulator)
-        logger.info("Running on the simulator, using CPU")
+        os_log("Running on the simulator, using CPU", log: logger, type: .info)
         #else
-        logger.info("Using CPU for transcription (Metal GPU disabled to prevent crashes)")
+        os_log("Using CPU for transcription (Metal GPU disabled to prevent crashes)", log: logger, type: .info)
         #endif
         
         // Check if Core ML encoder is available
@@ -130,21 +176,21 @@ actor WhisperContext {
         
         let hasCoreMLEncoder = FileManager.default.fileExists(atPath: coreMLEncoderPath)
         if hasCoreMLEncoder {
-            logger.info("Core ML encoder found at \(coreMLEncoderPath) - will be used for faster transcription")
+            os_log("Core ML encoder found at %{public}@ - will be used for faster transcription", log: logger, type: .info, coreMLEncoderPath)
         } else {
-            logger.debug("Core ML encoder not found - using CPU (this is normal and works fine)")
+            os_log("Core ML encoder not found - using CPU (this is normal and works fine)", log: logger, type: .debug)
         }
         
         let context = whisper_init_from_file_with_params(path, params)
         if let context {
             self.context = context
             if hasCoreMLEncoder {
-                logger.info("Whisper model loaded successfully with Core ML encoder optimization")
+                os_log("Whisper model loaded successfully with Core ML encoder optimization", log: logger, type: .info)
             } else {
-                logger.info("Whisper model loaded successfully with CPU")
+                os_log("Whisper model loaded successfully with CPU", log: logger, type: .info)
             }
         } else {
-            logger.error("Couldn't load model at \(path)")
+            os_log("Couldn't load model at %{public}@", log: logger, type: .error, path)
             throw WhisperError.couldNotInitializeContext
         }
     }
@@ -152,7 +198,7 @@ actor WhisperContext {
     private func setVADModelPath(_ path: String?) {
         self.vadModelPath = path
         if path != nil {
-            logger.info("VAD model loaded from bundle resources")
+            os_log("VAD model loaded from bundle resources", log: logger, type: .info)
         }
     }
 

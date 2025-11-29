@@ -131,7 +131,7 @@ struct ModelRowView: View {
             do {
                 try await modelManager.downloadModel(model)
             } catch {
-                print("Download failed: \(error)")
+                Logger.error("Download failed: \(error.localizedDescription)", category: "LocalModelManagementView")
             }
         }
     }
@@ -144,7 +144,7 @@ struct ModelRowView: View {
                 modelManager.objectWillChange.send()
             }
         } catch {
-            print("Delete failed: \(error)")
+            Logger.error("Delete failed: \(error.localizedDescription)", category: "LocalModelManagementView")
             modelManager.downloadError = "Failed to delete model: \(error.localizedDescription)"
         }
     }

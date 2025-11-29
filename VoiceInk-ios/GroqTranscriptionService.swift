@@ -16,7 +16,20 @@ protocol TranscriptionService {
 struct GroqTranscriptionService: TranscriptionService {
     // OpenAI-compatible APIs. Caller supplies baseURL and model.
 
+    /// Transcribe audio file using OpenAI-compatible API
+    /// Only supports "en" (English) and "es" (Spanish) languages
     func transcribeAudioFile(apiBaseURL: URL, apiKey: String, model: String, fileURL: URL, language: String? = nil) async throws -> String {
+        // Validate language parameter - only allow "en" or "es"
+        var validatedLanguage: String? = nil
+        if let lang = language {
+            if lang == "en" || lang == "es" {
+                validatedLanguage = lang
+            } else {
+                Logger.warning("Invalid language '\(lang)', only 'en' and 'es' are supported. Using auto-detection instead.", category: "GroqTranscriptionService")
+                validatedLanguage = nil
+            }
+        }
+        
         let components = URLComponents(url: apiBaseURL.appendingPathComponent("/v1/audio/transcriptions"), resolvingAgainstBaseURL: false)!
         guard let url = components.url else { throw URLError(.badURL) }
 
@@ -37,12 +50,30 @@ struct GroqTranscriptionService: TranscriptionService {
 
         // model field
         appendFormField("model", model)
-        if let language {
-            appendFormField("language", language)
+        // Only include language if it's "en" or "es"
+        if let validatedLanguage {
+            appendFormField("language", validatedLanguage)
         }
 
-        // file field
-        let fileData = try Data(contentsOf: fileURL)
+        // PERFORMANCE: Use async file reading to avoid blocking the thread
+        // Check file size first to avoid reading extremely large files
+        let fileAttributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let fileSize = fileAttributes[.size] as? Int64 ?? 0
+        guard fileSize > 0 && fileSize < 100_000_000 else { // 100MB limit
+            throw NSError(domain: "GroqAPI", code: 400, userInfo: [NSLocalizedDescriptionKey: "Audio file is too large or invalid"])
+        }
+        
+        // Read audio file data asynchronously
+        let fileData = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let data = try Data(contentsOf: fileURL)
+                    continuation.resume(returning: data)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
         let filename = fileURL.lastPathComponent
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
         body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
