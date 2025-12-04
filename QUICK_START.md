@@ -93,3 +93,4 @@ https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3
 
 Once you complete these 3 steps, you'll have fully offline English→Spanish translation using llama.cpp! 🎉
 
+

@@ -57,3 +57,4 @@ The only issue is the CocoaPods sandbox, which Xcode resolves automatically.
 
 **Just build in Xcode** - it's the simplest solution and handles all sandbox issues automatically!
 
+

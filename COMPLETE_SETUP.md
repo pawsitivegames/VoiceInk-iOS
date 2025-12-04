@@ -69,3 +69,4 @@ Return Spanish translation
 
 The integration is complete and your app is ready to use. Translation works immediately, and will automatically use llama.cpp when you add the framework!
 
+

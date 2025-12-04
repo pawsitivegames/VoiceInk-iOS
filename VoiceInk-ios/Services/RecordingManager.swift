@@ -539,28 +539,32 @@ final class RecordingManager: ObservableObject {
                 recordingDuration: recordingDuration,
                 modelContext: modelContext,
                 shouldStoreTranscript: shouldStoreTranscript,
-                onComplete: {
+                onComplete: { [weak self] in
+                    guard let self = self else { return }
                     // Clear processing state and reset to idle BEFORE cleanup
                     // This allows UI to update immediately
-                    processingNote = nil
-                    recordingState = .idle
+                    self.processingNote = nil
+                    self.recordingState = .idle
                     
                     // Defer cleanup to avoid blocking UI update
                     // This prevents the cleanup save from interfering with the insert
-                    Task { @MainActor in
+                    Task { @MainActor [weak self] in
+                        guard let self = self else { return }
                         try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second delay
-                        cleanupOldRecordings(modelContext: modelContext)
+                        self.cleanupOldRecordings(modelContext: modelContext)
                     }
                 },
-                onError: { errorMessage in
+                onError: { [weak self] errorMessage in
+                    guard let self = self else { return }
                     // Clear processing state immediately
-                    processingNote = nil
-                    recordingState = .idle
+                    self.processingNote = nil
+                    self.recordingState = .idle
                     
                     // Defer cleanup
-                    Task { @MainActor in
+                    Task { @MainActor [weak self] in
+                        guard let self = self else { return }
                         try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second delay
-                        cleanupOldRecordings(modelContext: modelContext)
+                        self.cleanupOldRecordings(modelContext: modelContext)
                     }
                 }
             )
